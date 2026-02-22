@@ -32,11 +32,15 @@ if __name__ == "__main__":
         with_stack=True,
     ) as prof:
         tts.infer(
-            spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True
+            spk_audio_prompt=prompt_wav,
+            text=text,
+            output_path="gen.wav",
+            verbose=True,
+            use_emo_text=True,
         )
 
     # Save Chrome trace JSON
-    prof.export_chrome_trace(os.path.join(traces_dir, "trace.json"))
+    prof.export_chrome_trace(os.path.join(traces_dir, "worker0.pt.trace.json"))
     print(f"Trace saved to {traces_dir}/trace.json")
 
     peak_mb = torch.cuda.max_memory_allocated() / 1024**2

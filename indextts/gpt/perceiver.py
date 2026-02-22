@@ -48,7 +48,10 @@ class Attend(nn.Module):
         ), "in order to use flash attention, you must be using pytorch 2.0 or above"
 
         # determine efficient attention configs for cuda and cpu
-        self.config = namedtuple("EfficientAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"])
+        self.config = namedtuple(
+            "EfficientAttentionConfig",
+            ["enable_flash", "enable_math", "enable_mem_efficient"],
+        )
         self.cpu_config = self.config(True, True, True)
         self.cuda_config = None
 
@@ -58,10 +61,14 @@ class Attend(nn.Module):
         device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
 
         if device_properties.major == 8 and device_properties.minor == 0:
-            print_once("A100 GPU detected, using flash attention if input tensor is on cuda")
+            print_once(
+                "A100 GPU detected, using flash attention if input tensor is on cuda"
+            )
             self.cuda_config = self.config(True, False, False)
         else:
-            print_once("Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda")
+            print_once(
+                "Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda"
+            )
             self.cuda_config = self.config(False, True, True)
 
     def get_mask(self, n, device):
@@ -99,7 +106,12 @@ class Attend(nn.Module):
 
         with torch.backends.cuda.sdp_kernel(**config._asdict()):
             out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0, is_causal=self.causal
+                q,
+                k,
+                v,
+                attn_mask=mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=self.causal,
             )
 
         return out
@@ -218,7 +230,9 @@ def FeedForward(dim, mult=4, causal_conv=False):
             Rearrange("b d n -> b n d"),
         )
 
-    return Sequential(nn.Linear(dim, dim_inner * 2), GEGLU(), conv, nn.Linear(dim_inner, dim))
+    return Sequential(
+        nn.Linear(dim, dim_inner * 2), GEGLU(), conv, nn.Linear(dim_inner, dim)
+    )
 
 
 class PerceiverResampler(nn.Module):
@@ -236,7 +250,9 @@ class PerceiverResampler(nn.Module):
         super().__init__()
         dim_context = default(dim_context, dim)
 
-        self.proj_context = nn.Linear(dim_context, dim) if dim_context != dim else nn.Identity()
+        self.proj_context = (
+            nn.Linear(dim_context, dim) if dim_context != dim else nn.Identity()
+        )
 
         self.latents = nn.Parameter(torch.randn(num_latents, dim))
         nn.init.normal_(self.latents, std=0.02)
@@ -265,13 +281,13 @@ class PerceiverResampler(nn.Module):
 
         x = self.proj_context(x)
 
-        latents = repeat(self.latents, "n d -> b n d", b=batch)
+        latents = repeat(self.latents, "n d -> b n d", b=batch)  # [1,1,1024]
 
         for attn, ff in self.layers:
-            latents = attn(latents, x, mask=mask) + latents
-            latents = ff(latents) + latents
+            latents = attn(latents, x, mask=mask) + latents  # [1,1,1024]
+            latents = ff(latents) + latents  # [1,1,1024]
 
-        return self.norm(latents)
+        return self.norm(latents)  # [1,1,1024]
 
 
 class Attention(nn.Module):
