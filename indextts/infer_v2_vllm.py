@@ -1,4 +1,4 @@
-from infer_v2 import IndexTTS2, find_most_similar_cosine
+from indextts.infer_v2 import IndexTTS2, find_most_similar_cosine
 import os
 import time
 import random
