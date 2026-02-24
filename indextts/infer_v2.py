@@ -766,21 +766,17 @@ class IndexTTS2:
                     enabled=self.dtype is not None,
                     dtype=self.dtype,
                 ):
-                    weight_vector_sum = torch.sum(weight_vector)
-                    if weight_vector_sum != 1.0 or emo_vector is None:
-                        emovec = self.gpt.merge_emovec(
-                            spk_cond_emb,
-                            emo_cond_emb,
-                            torch.tensor(
-                                [spk_cond_emb.shape[-1]], device=text_tokens.device
-                            ),
-                            torch.tensor(
-                                [emo_cond_emb.shape[-1]], device=text_tokens.device
-                            ),
-                            alpha=emo_alpha,
-                        )  # [1, 1280]
-                    else:
-                        emovec = emovec_mat
+                    emovec = self.gpt.merge_emovec(
+                        spk_cond_emb,
+                        emo_cond_emb,
+                        torch.tensor(
+                            [spk_cond_emb.shape[-1]], device=text_tokens.device
+                        ),
+                        torch.tensor(
+                            [emo_cond_emb.shape[-1]], device=text_tokens.device
+                        ),
+                        alpha=emo_alpha,
+                    )  # [1, 1280]
 
                     if emo_vector is not None:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
