@@ -4,7 +4,7 @@ import torchaudio
 import random
 import os
 from indextts.infer_v2_vllm import IndexTTS2VLLM
-
+import argparse
 from transformers import SeamlessM4TFeatureExtractor
 from indextts.utils.maskgct_utils import build_semantic_model
 from indextts.utils.front import TextNormalizer, TextTokenizer
@@ -194,6 +194,10 @@ class InferenceSpeechTest(IndexTTS2VLLM):
 if __name__ == "__main__":
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    args = argparse.ArgumentParser()
+    args.add_argument("--use_vllm", action="store_true")
+    args = args.parse_args()
+
     prompt_wav = os.path.join(root_dir, "examples/voice_01.wav")
     text = "Ezreal and Jinx teamed up with Ahri, Yasuo, and Teemo to take down the enemy's Nexus in an epic late-game pentakill."
     tts = InferenceSpeechTest(
@@ -201,6 +205,7 @@ if __name__ == "__main__":
         model_dir=os.path.join(root_dir, "checkpoints"),
         use_fp16=True,
         use_int8=True,
+        use_vllm=args.use_vllm,
     )
 
     codes, speech_conditioning_latent = tts.test_inference(

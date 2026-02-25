@@ -6,7 +6,12 @@ import torch.nn.functional as F
 
 import transformers
 from transformers import GPT2Config, LogitsProcessorList
-from indextts.gpt.model_v2 import UnifiedVoice, LearnedPositionEmbeddings
+from indextts.gpt.model_v2 import (
+    UnifiedVoice,
+    LearnedPositionEmbeddings,
+    ConditioningEncoder,
+    MelEncoder,
+)
 
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
@@ -21,6 +26,9 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from typing import Optional, Union, Iterable
 from vllm.model_executor.models.gpt2 import GPT2Model
+from vllm import LLM, SamplingParams
+from vllm import ModelRegistry
+from huggingface_hub import snapshot_download
 
 
 def null_position_embeddings(range, dim):
@@ -65,7 +73,12 @@ class GPT2LMHeadModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        print(inputs_embeds.shape if inputs_embeds is not None else "None")
+        print(
+            "inputs_embeds.shape",
+            inputs_embeds.shape if inputs_embeds is not None else "None",
+        )
+        print("positions.shape", positions.shape if positions is not None else "None")
+        print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
 
         if inputs_embeds is not None and inputs_embeds.shape[0] != 1:
             mel_len = inputs_embeds.shape[0]  # target_len
@@ -77,7 +90,7 @@ class GPT2LMHeadModel(nn.Module):
             self.cached_mel_emb = mel_emb
         elif positions.shape[0] != 1:
             emb = self.embeddings(input_ids)
-            emb = emb + self.text_pos_embedding(positions.unsqueeze(0))
+            emb = emb + self.text_pos_embedding.emb(positions)
 
         else:
             emb = self.embeddings(input_ids)
@@ -124,31 +137,14 @@ class GPT2LMHeadModel(nn.Module):
         return loader.load_weights(_remap_weights(weights))
 
 
+ModelRegistry.register_model("GPT2InferenceModel", GPT2LMHeadModel)
+
+
 class UnifiedVoiceVLLM(UnifiedVoice):
     def __init__(
         self,
-        layers=8,
-        model_dim=512,
-        heads=8,
-        max_text_tokens=120,
-        max_mel_tokens=250,
-        max_conditioning_inputs=1,
-        mel_length_compression=1024,
-        number_text_tokens=256,
-        start_text_token=0,
-        stop_text_token=1,
-        number_mel_codes=8194,
-        start_mel_token=8192,
-        stop_mel_token=8193,
-        train_solo_embeddings=False,
-        use_mel_codes_as_input=True,
-        checkpointing=True,
-        types=1,
-        condition_num_latent=32,
-        condition_type="perceiver",
-        condition_module=None,
-        emo_condition_module=None,
-        use_accel=False,
+        *args,
+        **kwargs,
     ):
         """
         Args:
@@ -170,218 +166,26 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             checkpointing:
             condition_type: perceiver, gst or default encoder
         """
-        super().__init__()
-        self.number_text_tokens = number_text_tokens
-        self.start_text_token = start_text_token
-        self.stop_text_token = stop_text_token
-        self.number_mel_codes = number_mel_codes
-        self.start_mel_token = start_mel_token
-        self.stop_mel_token = stop_mel_token
-        self.layers = layers
-        self.heads = heads
-        self.max_mel_tokens = max_mel_tokens
-        self.max_text_tokens = max_text_tokens
-        self.model_dim = model_dim  # 1280
-        self.max_conditioning_inputs = max_conditioning_inputs
-        self.mel_length_compression = mel_length_compression
-        self.condition_type = condition_type
-        self.cond_num = condition_num_latent
-        self.cond_mask_pad = nn.ConstantPad1d((self.cond_num, 0), True)
-        self.emo_cond_mask_pad = nn.ConstantPad1d((1, 0), True)
-        if condition_type == "perceiver":
-            self.conditioning_encoder = ConditioningEncoder(
-                1024, model_dim, num_attn_heads=heads
-            )
-            self.perceiver_encoder = PerceiverResampler(
-                model_dim, dim_context=model_dim, num_latents=self.cond_num
-            )
-        elif (
-            condition_type == "conformer_perceiver"
-            or condition_type == "conformer_encoder"
-        ):
-            self.conditioning_encoder = ConformerEncoder(
-                input_size=1024,
-                output_size=condition_module["output_size"],  # 512
-                linear_units=condition_module["linear_units"],  # 2048
-                attention_heads=condition_module["attention_heads"],  # 8
-                num_blocks=condition_module["num_blocks"],  # 6
-                input_layer=condition_module["input_layer"],  # "conv2d2"
-            )
-            if condition_type == "conformer_perceiver":
-                self.perceiver_encoder = PerceiverResampler(
-                    model_dim,  # 1280
-                    dim_context=condition_module["output_size"],  # 512
-                    ff_mult=condition_module["perceiver_mult"],  # 2
-                    heads=condition_module["attention_heads"],  # 8
-                    num_latents=self.cond_num,  # 32
-                )
-        else:
-            self.conditioning_encoder = ConditioningEncoder(
-                1024, model_dim, num_attn_heads=heads, mean=True
-            )
-
-        self.emo_conditioning_encoder = ConformerEncoder(
-            input_size=1024,
-            output_size=emo_condition_module["output_size"],
-            linear_units=emo_condition_module["linear_units"],
-            attention_heads=emo_condition_module["attention_heads"],
-            num_blocks=emo_condition_module["num_blocks"],
-            input_layer=emo_condition_module["input_layer"],
-        )
-        self.emo_perceiver_encoder = PerceiverResampler(
-            1024,
-            dim_context=emo_condition_module["output_size"],  # 512
-            ff_mult=emo_condition_module["perceiver_mult"],  # 2
-            heads=emo_condition_module["attention_heads"],  # 4
-            num_latents=1,
-        )
-
-        self.text_embedding = nn.Embedding(
-            self.number_text_tokens * types + 1, model_dim
-        )
-        self.emo_layer = nn.Linear(model_dim, model_dim)
-        self.emovec_layer = nn.Linear(1024, model_dim)
-
-        if use_mel_codes_as_input:
-            self.mel_embedding = nn.Embedding(self.number_mel_codes, model_dim)
-        else:
-            self.mel_embedding = MelEncoder(model_dim, resblocks_per_reduction=1)
-        (
-            self.gpt,
-            self.mel_pos_embedding,
-            self.text_pos_embedding,
-            self.mel_layer_pos_embedding,
-            self.text_layer_pos_embedding,
-        ) = build_hf_gpt_transformer(
-            layers,
-            model_dim,
-            heads,
-            self.max_mel_tokens + 2 + self.max_conditioning_inputs,
-            self.max_text_tokens + 2,
-            checkpointing,
-        )
-        if train_solo_embeddings:
-            self.mel_solo_embedding = nn.Parameter(
-                torch.randn(1, 1, model_dim) * 0.02, requires_grad=True
-            )
-            self.text_solo_embedding = nn.Parameter(
-                torch.randn(1, 1, model_dim) * 0.02, requires_grad=True
-            )
-        else:
-            self.mel_solo_embedding = 0
-            self.text_solo_embedding = 0
-
-        self.final_norm = nn.LayerNorm(model_dim)
-        self.text_head = nn.Linear(model_dim, self.number_text_tokens * types + 1)
-        self.mel_head = nn.Linear(model_dim, self.number_mel_codes)
-
-        self.speed_emb = nn.Embedding(2, model_dim)
-        self.speed_emb.weight.data.normal_(mean=0.0, std=0.0)
-
-        # Initialize the embeddings per the GPT-2 scheme
-        embeddings = [self.text_embedding]
-        if use_mel_codes_as_input:
-            embeddings.append(self.mel_embedding)
-        for module in embeddings:
-            module.weight.data.normal_(mean=0.0, std=0.02)
-
-        self.use_accel = use_accel
-        self.accel_engine = None  # Will be initialized in post_init_gpt2_config
+        super().__init__(*args, **kwargs)
 
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
-        seq_length = self.max_mel_tokens + self.max_text_tokens + 2
-        gpt_config = GPT2Config(
-            vocab_size=self.number_mel_codes,
-            n_positions=seq_length,
-            n_ctx=seq_length,
-            n_embd=self.model_dim,
-            n_layer=self.layers,
-            n_head=self.heads,
-            gradient_checkpointing=False,
-            use_cache=True,
+        del self.gpt
+        del self.mel_pos_embedding
+        del self.text_pos_embedding
+        del self.mel_layer_pos_embedding
+        del self.text_layer_pos_embedding
+
+        path = snapshot_download(
+            "janak22/index-tts-gpt",
+            ignore_patterns=["*.tflite", "*.onnx", "*.msgpack", "*.ot", "*.h5"],
         )
-
-        if self.use_accel and torch.cuda.is_available():
-            # Check if flash attention is available
-            try:
-                import flash_attn
-            except ImportError:
-                raise ImportError(
-                    "flash_attn is required for acceleration but not installed. Please install from https://github.com/Dao-AILab/flash-attention/releases/"
-                )
-
-            from indextts.accel import GPT2AccelModel, AccelInferenceEngine
-
-            # Create accel model
-            accel_gpt = GPT2AccelModel(gpt_config)
-            accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
-
-            if half:
-                accel_gpt = accel_gpt.half().cuda()
-            else:
-                accel_gpt = accel_gpt.cuda()
-            accel_gpt.eval()
-
-            lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
-            self.accel_engine = AccelInferenceEngine(
-                model=accel_gpt,
-                lm_head=lm_head_with_norm,
-                num_layers=self.layers,
-                num_heads=self.heads,
-                head_dim=self.model_dim // self.heads,
-                block_size=256,
-                num_blocks=16,  # Reduce to save memory (16*256 = 4096 tokens capacity)
-                use_cuda_graph=True,
-            )
-            print("acceleration engine initialized")
-        self.inference_model = GPT2InferenceModel(
-            gpt_config,
-            self.gpt,
-            self.mel_pos_embedding,
-            self.mel_embedding,
-            self.final_norm,
-            self.mel_head,
-            kv_cache=kv_cache,
+        self.inference_model = LLM(
+            path,
+            max_model_len=1024,
+            skip_tokenizer_init=True,
+            enable_prompt_embeds=True,
+            dtype="float32",
         )
-        if use_deepspeed and half and torch.cuda.is_available():
-            import deepspeed
-
-            self.ds_engine = deepspeed.init_inference(
-                model=self.inference_model,
-                mp_size=1,
-                replace_with_kernel_inject=True,
-                dtype=torch.float16,
-            )
-            self.inference_model = self.ds_engine.module.eval()
-        elif use_deepspeed and torch.cuda.is_available():
-            import deepspeed
-
-            self.ds_engine = deepspeed.init_inference(
-                model=self.inference_model,
-                mp_size=1,
-                replace_with_kernel_inject=True,
-                dtype=torch.float32,
-            )
-            self.inference_model = self.ds_engine.module.eval()
-        else:
-            self.inference_model = self.inference_model.eval()
-
-        # self.inference_model = PrunedGPT2InferenceModel(gpt_config, self.gpt, self.mel_pos_embedding, self.mel_embedding, self.final_norm, self.mel_head)
-        self.gpt.wte = self.mel_embedding
-
-    def set_mel_padding(self, mel_input_tokens, mel_lengths):
-        """
-        Given mel tokens that are derived from a padded audio clip and the actual lengths of each batch element in
-        that audio clip, reformats the tokens with STOP_MEL_TOKEN in place of the zero padding. This is required
-        preformatting to create a working TTS model.
-        """
-        for b in range(len(mel_lengths)):
-            # Due to the convolutional nature of how these tokens are generated,
-            # it would be best if the model predicts a token past the actual last token.
-            actual_end = mel_lengths[b]
-            if actual_end < mel_input_tokens.shape[-1]:
-                mel_input_tokens[b, actual_end:] = self.stop_mel_token
-        return mel_input_tokens
 
     def set_text_padding(self, text_input_tokens, text_lengths):
         """
@@ -632,30 +436,20 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             else trunc_index + max_generate_length
         )
 
-        # Use accel engine if available (single sequence only)
-        if self.accel_engine is not None and num_return_sequences == 1:
-            output = self.accel_engine.generate(
-                inputs,  # fake input_ids (all 1s + start_mel_token)
-                max_new_tokens=max_length - trunc_index,
-                attention_mask=attention_mask,
-                temperature=hf_generate_kwargs.get("temperature", 1),
-                stop_tokens=[self.stop_mel_token],
-                tts_embeddings=inputs_embeds,  # [pad][cond][text] embeddings (87 tokens, NO start_mel_token)
-                tts_mel_embedding=self.inference_model.embeddings,  # mel_embedding layer
-                tts_text_pos_embedding=self.inference_model.text_pos_embedding,  # text_pos_embedding layer
-            )
-        else:
-            output = self.inference_model.generate(
-                inputs,
-                bos_token_id=self.start_mel_token,
-                pad_token_id=self.stop_mel_token,
-                eos_token_id=self.stop_mel_token,
-                attention_mask=attention_mask,
-                max_length=max_length,
-                logits_processor=logits_processor,
-                num_return_sequences=num_return_sequences,
-                **hf_generate_kwargs,
-            )
+        prompt_token_ids = [
+            dict(prompt_token_ids=p, prompt_embeds=inputs_embeds) for p in input_ids
+        ]
+
+        output = self.inference_model.generate(
+            prompt_token_ids,
+            sampling_params=SamplingParams(
+                temperature=hf_generate_kwargs.get("temperature", 0.8),
+                max_tokens=max_length,
+                top_p=hf_generate_kwargs.get("top_p", 0.8),
+                top_k=hf_generate_kwargs.get("top_k", 30),
+                repetition_penalty=hf_generate_kwargs.get("repetition_penalty", 10.0),
+            ),
+        )
         if isinstance(output, torch.Tensor):
             return output[:, trunc_index:], speech_conditioning_latent
         # GenerateOutput
