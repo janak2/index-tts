@@ -8,17 +8,27 @@ from huggingface_hub import snapshot_download
 from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 from vllm import ModelRegistry
 from vllm.config import VllmConfig
+import torch
+from typing import Optional
+from vllm.sequence import IntermediateTensors
 
 
 class GPT2TestModel(GPT2LMHeadModel):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def forward(self, *args, **kwargs):
-        return super().forward(*args, **kwargs)
-
-    def generate(self, *args, **kwargs):
-        return super().generate(*args, **kwargs)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ):
+        print(inputs_embeds.shape if inputs_embeds is not None else "None")
+        print(input_ids.shape if input_ids is not None else "None")
+        return super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
 
 
 ModelRegistry.register_model("GPT2TestModel", GPT2TestModel)
@@ -39,11 +49,12 @@ def main():
         max_model_len=1024,
         max_num_seqs=num_seqs,
         hf_overrides={"architectures": ["GPT2TestModel"]},
+        skip_tokenizer_init=False,
+        enable_prompt_embeds=True,
     )
 
     prompt_token_ids = [
-        [randint(0, 10000) for _ in range(randint(100, max_input_len))]
-        for _ in range(num_seqs)
+        [randint(0, 10000) for _ in range(100)] for _ in range(num_seqs)
     ]
     sampling_params = [
         SamplingParams(
@@ -52,17 +63,16 @@ def main():
         for _ in range(num_seqs)
     ]
     # uncomment the following line for vllm
-    prompt_token_ids = [dict(prompt_token_ids=p) for p in prompt_token_ids]
+    prompt_token_ids = [
+        dict(prompt_token_ids=p, prompt_embeds=torch.randn(1, len(p), 768))
+        for p in prompt_token_ids
+    ]
 
-    llm.generate(["Benchmark: "], SamplingParams())
     t = time.time()
-    llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
+    outputs = llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
     t = time.time() - t
-    total_tokens = sum(sp.max_tokens for sp in sampling_params)
-    throughput = total_tokens / t
-    print(
-        f"Total: {total_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s"
-    )
+    print(f"Time: {t:.2f}s")
+    print(len(outputs[0].outputs[0].token_ids))
 
 
 if __name__ == "__main__":
