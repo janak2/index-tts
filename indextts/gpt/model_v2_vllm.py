@@ -20,7 +20,13 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from typing import Optional, Union, Iterable
-from vllm.model_executor.models.gpt2 import _add_transformer_prefix, GPT2Model
+from vllm.model_executor.models.gpt2 import GPT2Model
+
+
+def null_position_embeddings(range, dim):
+    if range.ndim == 1:
+        return torch.zeros((range.shape[0], dim), device=range.device)
+    return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
 
 
 class LearnedPositionEmbeddings(nn.Module):
@@ -45,6 +51,10 @@ class GPT2LMHeadModel(nn.Module):
         self.config = config
         self.transformer = GPT2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
+        )
+        del self.transformer.wpe
+        self.transformer.wpe = functools.partial(
+            null_position_embeddings, dim=self.config.n_embd
         )
         self.final_norm = nn.LayerNorm(self.config.n_embd)
         self.mel_head = nn.Linear(self.config.n_embd, self.config.vocab_size)
@@ -79,6 +89,10 @@ class GPT2LMHeadModel(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
+        if sampling_metadata.selected_token_indices is not None:
+            hidden_states = hidden_states.index_select(
+                0, sampling_metadata.selected_token_indices
+            )
         logits = self.lm_head(hidden_states)
         return logits
 

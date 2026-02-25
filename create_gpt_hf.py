@@ -59,6 +59,7 @@ def load_gpt_hf(
         # hf_overrides={"architectures": ["GPT2TestModel"]},
         skip_tokenizer_init=True,
         enable_prompt_embeds=True,
+        dtype="float32",
     )
 
 
