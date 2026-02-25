@@ -1141,7 +1141,6 @@ if __name__ == "__main__":
         text=text,
         output_path="gen.wav",
         verbose=True,
-        use_emo_text=True,
     )
     # char_size = 5
     # import string
