@@ -6,55 +6,58 @@ import torch.nn.functional as F
 
 import transformers
 from transformers import GPT2Config, LogitsProcessorList
-from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 from indextts.gpt.model_v2 import UnifiedVoice
 
-# from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
-from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
-from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import AutoWeightsLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     maybe_prefix,
-    _add_transformer_prefix,
 )
 from vllm.sequence import IntermediateTensors
 from typing import Optional, Union, Iterable
-from vllm.model_executor.models.gpt2 import _add_transformer_prefix
+from vllm.model_executor.models.gpt2 import _add_transformer_prefix, GPT2Model
+
+
+class LearnedPositionEmbeddings(nn.Module):
+    def __init__(self, seq_len, model_dim, init=0.02):
+        super().__init__()
+        self.emb = nn.Embedding(seq_len, model_dim)
+        # Initializing this way is standard for GPT-2
+        self.emb.weight.data.normal_(mean=0.0, std=init)
+
+    def forward(self, x):
+        sl = x.shape[1]
+        return self.emb(torch.arange(0, sl, device=x.device))
+
+    def get_fixed_embedding(self, ind, dev):
+        return self.emb(torch.tensor([ind], device=dev)).unsqueeze(0)
 
 
 class GPT2LMHeadModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.config = config
-        self.quant_config = quant_config
         self.transformer = GPT2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.lm_head",
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
+        self.final_norm = nn.LayerNorm(self.config.n_embd)
+        self.mel_head = nn.Linear(self.config.n_embd, self.config.vocab_size)
 
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.lm_head = nn.Sequential(self.final_norm, self.mel_head)
+
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
+        self.text_pos_embedding = LearnedPositionEmbeddings(
+            self.config.max_mel_seq_len, self.config.n_embd
+        )
+        self.embeddings = nn.Embedding(self.config.vocab_size, self.config.n_embd)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.get_input_embeddings(input_ids)
@@ -76,13 +79,29 @@ class GPT2LMHeadModel(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+        logits = self.lm_head(hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        weights = _add_transformer_prefix(weights)
-        return loader.load_weights(weights)
+        outer_modules = (
+            "text_pos_embedding.",
+            "embeddings.",
+            "final_norm.",
+            "mel_head.",
+        )
+
+        def _remap_weights(weights):
+            for name, tensor in weights:
+                if (
+                    not name.startswith("transformer.")
+                    and not name.startswith("lm_head")
+                    and not any(name.startswith(m) for m in outer_modules)
+                ):
+                    name = "transformer." + name
+                yield name, tensor
+
+        return loader.load_weights(_remap_weights(weights))
 
 
 def build_hf_gpt_transformer(

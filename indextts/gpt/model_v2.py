@@ -51,6 +51,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         self.text_pos_embedding = text_pos_emb
         self.embeddings = embeddings
         self.final_norm = norm
+        self.mel_head = linear
         self.lm_head = nn.Sequential(norm, linear)
         self.kv_cache = kv_cache
 
