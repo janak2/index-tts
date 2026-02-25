@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 import transformers
 from transformers import GPT2Config, LogitsProcessorList
-from indextts.gpt.model_v2 import UnifiedVoice
+from indextts.gpt.model_v2 import UnifiedVoice, LearnedPositionEmbeddings
 
 
 from indextts.gpt.conformer_encoder import ConformerEncoder
@@ -27,21 +27,6 @@ def null_position_embeddings(range, dim):
     if range.ndim == 1:
         return torch.zeros((range.shape[0], dim), device=range.device)
     return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
-
-
-class LearnedPositionEmbeddings(nn.Module):
-    def __init__(self, seq_len, model_dim, init=0.02):
-        super().__init__()
-        self.emb = nn.Embedding(seq_len, model_dim)
-        # Initializing this way is standard for GPT-2
-        self.emb.weight.data.normal_(mean=0.0, std=init)
-
-    def forward(self, x):
-        sl = x.shape[1]
-        return self.emb(torch.arange(0, sl, device=x.device))
-
-    def get_fixed_embedding(self, ind, dev):
-        return self.emb(torch.tensor([ind], device=dev)).unsqueeze(0)
 
 
 class GPT2LMHeadModel(nn.Module):
@@ -68,6 +53,7 @@ class GPT2LMHeadModel(nn.Module):
             self.config.max_mel_seq_len, self.config.n_embd
         )
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.n_embd)
+        self.cached_mel_emb = torch.zeros([0, 0])
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.get_input_embeddings(input_ids)
@@ -79,8 +65,28 @@ class GPT2LMHeadModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        print(inputs_embeds.shape if inputs_embeds is not None else "None")
+
+        if inputs_embeds is not None and inputs_embeds.shape[0] != 1:
+            mel_len = inputs_embeds.shape[0]  # target_len
+            text_inputs = input_ids[mel_len:]
+            text_emb = self.embeddings(text_inputs)
+            text_emb = text_emb + self.text_pos_embedding(text_emb)
+            mel_emb = inputs_embeds
+            emb = torch.cat([mel_emb, text_emb], dim=0)
+            self.cached_mel_emb = mel_emb
+        elif positions.shape[0] != 1:
+            emb = self.embeddings(input_ids)
+            emb = emb + self.text_pos_embedding(positions.unsqueeze(0))
+
+        else:
+            emb = self.embeddings(input_ids)
+            emb = emb + self.text_pos_embedding.emb(
+                positions - self.cached_mel_emb.shape[1]
+            )
+
         hidden_states = self.transformer(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids, positions, intermediate_tensors, inputs_embeds=emb
         )
         return hidden_states
 
@@ -116,39 +122,6 @@ class GPT2LMHeadModel(nn.Module):
                 yield name, tensor
 
         return loader.load_weights(_remap_weights(weights))
-
-
-def build_hf_gpt_transformer(
-    layers, model_dim, heads, max_mel_seq_len, max_text_seq_len, checkpointing
-):
-    """
-    GPT-2 implemented by the HuggingFace library.
-    """
-    from transformers import GPT2Config, GPT2Model
-
-    gpt_config = GPT2Config(
-        vocab_size=256,  # Unused.
-        n_positions=max_mel_seq_len + max_text_seq_len,
-        n_ctx=max_mel_seq_len + max_text_seq_len,
-        n_embd=model_dim,
-        n_layer=layers,
-        n_head=heads,
-        gradient_checkpointing=checkpointing,
-        use_cache=not checkpointing,
-    )
-    gpt = GPT2Model(gpt_config)
-    # Override the built in positional embeddings
-    del gpt.wpe
-    gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
-    # Built-in token embeddings are unused.
-    del gpt.wte
-    return (
-        gpt,
-        LearnedPositionEmbeddings(max_mel_seq_len, model_dim),
-        LearnedPositionEmbeddings(max_text_seq_len, model_dim),
-        None,
-        None,
-    )
 
 
 class UnifiedVoiceVLLM(UnifiedVoice):
