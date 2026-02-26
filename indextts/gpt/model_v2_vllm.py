@@ -1,5 +1,5 @@
 import functools
-
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -179,6 +179,9 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         del self.mel_layer_pos_embedding
         del self.text_layer_pos_embedding
 
+        gc.collect()
+        torch.cuda.empty_cache()
+
         path = snapshot_download(
             "janak22/index-tts-gpt",
             ignore_patterns=["*.tflite", "*.onnx", "*.msgpack", "*.ot", "*.h5"],
@@ -188,7 +191,8 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             max_model_len=1024,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
-            dtype="float32",
+            dtype="float32" if not half else "float16",
+            gpu_memory_utilization=0.6,
         )
 
     def set_text_padding(self, text_input_tokens, text_lengths):

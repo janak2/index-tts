@@ -40,23 +40,6 @@ class InferenceSpeechTest(IndexTTS2VLLM):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.float16 if self.use_fp16 else None
 
-        if use_vllm:
-            self.gpt = UnifiedVoiceVLLM(**self.cfg.gpt, use_accel=self.use_accel)
-        else:
-            self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
-
-        self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
-        load_checkpoint(self.gpt, self.gpt_path)
-        self.gpt = self.gpt.to(self.device)
-        if self.use_fp16:
-            self.gpt.eval().half()
-        else:
-            self.gpt.eval()
-
-        self.gpt.post_init_gpt2_config(
-            use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16
-        )
-
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained(
             "facebook/w2v-bert-2.0"
         )
@@ -80,10 +63,34 @@ class InferenceSpeechTest(IndexTTS2VLLM):
             self.semantic_mean = self.semantic_mean.half()
             self.semantic_std = self.semantic_std.half()
 
+        semantic_model_size_gb = sum(
+            p.numel() * p.element_size() for p in self.semantic_model.parameters()
+        ) / (1024**3)
+        print(
+            f">> Semantic model size: {semantic_model_size_gb:.2f} GB, device: {self.semantic_model.device}"
+        )
+
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer(enable_glossary=True)
         self.normalizer.load()
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
+
+        if use_vllm:
+            self.gpt = UnifiedVoiceVLLM(**self.cfg.gpt, use_accel=self.use_accel)
+        else:
+            self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
+
+        self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
+        load_checkpoint(self.gpt, self.gpt_path)
+        self.gpt = self.gpt.to(self.device)
+        if self.use_fp16:
+            self.gpt.eval().half()
+        else:
+            self.gpt.eval()
+
+        self.gpt.post_init_gpt2_config(
+            use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16
+        )
 
     def test_inference(
         self,
