@@ -51,6 +51,7 @@ def main():
         hf_overrides={"architectures": ["GPT2TestModel"]},
         skip_tokenizer_init=False,
         enable_prompt_embeds=True,
+        dtype="float16",
     )
 
     prompt_token_ids = [

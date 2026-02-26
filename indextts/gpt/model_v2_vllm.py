@@ -31,10 +31,12 @@ from vllm import ModelRegistry
 from huggingface_hub import snapshot_download
 
 
-def null_position_embeddings(range, dim):
+def null_position_embeddings(range, dim, dtype=torch.float32):
     if range.ndim == 1:
-        return torch.zeros((range.shape[0], dim), device=range.device)
-    return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
+        return torch.zeros((range.shape[0], dim), device=range.device, dtype=dtype)
+    return torch.zeros(
+        (range.shape[0], range.shape[1], dim), device=range.device, dtype=dtype
+    )
 
 
 class GPT2LMHeadModel(nn.Module):
@@ -47,7 +49,9 @@ class GPT2LMHeadModel(nn.Module):
         )
         del self.transformer.wpe
         self.transformer.wpe = functools.partial(
-            null_position_embeddings, dim=self.config.n_embd
+            null_position_embeddings,
+            dim=self.config.n_embd,
+            dtype=vllm_config.model_config.dtype,
         )
         self.final_norm = nn.LayerNorm(self.config.n_embd)
         self.mel_head = nn.Linear(self.config.n_embd, self.config.vocab_size)

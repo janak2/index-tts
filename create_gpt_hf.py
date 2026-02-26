@@ -34,6 +34,10 @@ def push_gpt_hf(
     gpt_path = os.path.join(model_dir, cfg.gpt_checkpoint)
     load_checkpoint(gpt, gpt_path)
     gpt = gpt.to(device)
+    if use_fp16:
+        gpt.eval().half()
+    else:
+        gpt.eval()
 
     gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=use_fp16)
 
@@ -59,7 +63,7 @@ def load_gpt_hf(
         # hf_overrides={"architectures": ["GPT2TestModel"]},
         skip_tokenizer_init=True,
         enable_prompt_embeds=True,
-        dtype="float32",
+        dtype="float16",
     )
 
 
@@ -67,14 +71,15 @@ if __name__ == "__main__":
     root_dir = os.path.dirname(os.path.abspath(__file__))
     parser = argparse.ArgumentParser()
     parser.add_argument("--push", action="store_true")
-    parser.add_argument("--load", action="store_true")
+    parser.add_argument("--use_fp16", action="store_true")
     args = parser.parse_args()
     if args.push:
         push_gpt_hf(
             cfg_path=os.path.join(root_dir, "checkpoints/config.yaml"),
             model_dir=os.path.join(root_dir, "checkpoints"),
+            use_fp16=args.use_fp16,
         )
-    if args.load:
+    if not args.push:
         load_gpt_hf(
             repo_id="janak22/index-tts-gpt",
         )
