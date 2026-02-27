@@ -88,7 +88,7 @@ class GPT2LMHeadModel(nn.Module):
             mel_len = inputs_embeds.shape[0]  # target_len
             text_inputs = input_ids[mel_len:]
             text_emb = self.embeddings(text_inputs)
-            text_emb = text_emb + self.text_pos_embedding(text_emb)
+            text_emb = text_emb + self.text_pos_embedding(text_emb.unsqueeze(0))
             mel_emb = inputs_embeds
             emb = torch.cat([mel_emb, text_emb], dim=0)
             self.cached_mel_emb = mel_emb
@@ -175,7 +175,6 @@ class UnifiedVoiceVLLM(UnifiedVoice):
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
         del self.gpt
         del self.mel_pos_embedding
-        del self.text_pos_embedding
         del self.mel_layer_pos_embedding
         del self.text_layer_pos_embedding
 
@@ -189,6 +188,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         self.inference_model = LLM(
             path,
             max_model_len=1024,
+            max_num_seqs=1,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
@@ -403,7 +403,6 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(
             conds_latent, text_inputs
         )  # [b, target_len+1], [b, target_len, 1280], [b, target_len+1] # target_len = 34 + L + 2
-        self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
             inputs = input_ids
         else:
@@ -445,7 +444,8 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         )
 
         prompt_token_ids = [
-            dict(prompt_token_ids=p, prompt_embeds=inputs_embeds) for p in input_ids
+            dict(prompt_token_ids=p.tolist(), prompt_embeds=inputs_embeds)
+            for p in input_ids
         ]
 
         output = self.inference_model.generate(
@@ -458,8 +458,8 @@ class UnifiedVoiceVLLM(UnifiedVoice):
                 repetition_penalty=hf_generate_kwargs.get("repetition_penalty", 10.0),
             ),
         )
-        if isinstance(output, torch.Tensor):
-            return output[:, trunc_index:], speech_conditioning_latent
-        # GenerateOutput
-        output.sequences = output.sequences[:, trunc_index:]
-        return output, speech_conditioning_latent
+        tokens = []
+        for o in output:
+            tokens.append(o.outputs[0].token_ids)
+        tokens = torch.tensor(tokens)
+        return tokens, speech_conditioning_latent

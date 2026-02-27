@@ -92,6 +92,8 @@ class InferenceSpeechTest(IndexTTS2VLLM):
             use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16
         )
 
+        print(torch.cuda.memory_summary(device=self.device, abbreviated=False))
+
     def test_inference(
         self,
         spk_audio_prompt,
