@@ -174,7 +174,6 @@ class UnifiedVoiceVLLM(UnifiedVoice):
 
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
         del self.gpt
-        del self.mel_pos_embedding
         del self.mel_layer_pos_embedding
         del self.text_layer_pos_embedding
 
@@ -456,6 +455,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
                 top_p=hf_generate_kwargs.get("top_p", 0.8),
                 top_k=hf_generate_kwargs.get("top_k", 30),
                 repetition_penalty=hf_generate_kwargs.get("repetition_penalty", 10.0),
+                stop_token_ids=[self.stop_mel_token],
             ),
         )
         tokens = []
@@ -463,3 +463,94 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             tokens.append(o.outputs[0].token_ids)
         tokens = torch.tensor(tokens)
         return tokens, speech_conditioning_latent
+
+    def prepare_gpt_inputs(
+        self,
+        conditional_latents: torch.Tensor,  # [1, 34, 1280]
+        text_inputs: torch.Tensor,  # [1, L]
+    ):
+        """
+        Prepare the inputs for the GPT2InferenceModel to generate.
+        Args:
+            conds_latent: (b, 32, dim) audio conditioning embedding by `get_conditioning()`
+            text_inputs: (b, L)
+        Returns:
+            input_ids: (b, s+1) the input ids for the GPT2InferenceModel.generate()
+            inputs_embeds: (b, s+1, dim) the input embeddings for the GPT2InferenceModel.forward()
+            attention_mask: (b, s+1) the attention mask for the GPT2InferenceModel.generate()
+        """
+        b, L = text_inputs.shape[:2]
+        device = text_inputs.device
+        single_cond = (
+            conditional_latents.ndim == 3 and conditional_latents.shape[0] == 1
+        )
+        if not single_cond:
+            assert conditional_latents.shape[0] == b, (
+                f"batch size mismatch: {conditional_latents.shape[0]} vs {b}"
+            )
+        batched_mel_emb = []
+        attention_masks = []
+        target_len = conditional_latents.shape[1] + L + 2
+        for i in range(b):
+            valid_mask = (text_inputs[i] != self.stop_text_token) & (
+                text_inputs[i] != self.start_text_token
+            )
+            text_input = text_inputs[i][valid_mask]  # [L]
+            text_input = F.pad(text_input, (1, 0), value=self.start_text_token)
+            text_input = F.pad(text_input, (0, 1), value=self.stop_text_token)  # [L+2]
+            text_input_pos = torch.arange(
+                0, text_input.size(-1), device=device
+            )  # [L+2]
+            text_emb = self.text_embedding(text_input) + self.text_pos_embedding.emb(
+                text_input_pos
+            )  # [L+2, 1280]
+            # concatenate [conditional latents][text embeddings]
+            conds_text_emb = [
+                conditional_latents.squeeze(0)
+                if single_cond
+                else conditional_latents[i],
+                text_emb,
+            ]
+            # +1 for the start_mel_token
+            attention_mask = torch.ones(target_len + 1, dtype=torch.long, device=device)
+            # check this text input is padded
+            padding: int = L + 2 - text_input.size(-1)
+            # pad left of [cond][text] -> [pad][cond][text]
+            if padding > 0:
+                pad = torch.zeros(
+                    (padding, conditional_latents.size(-1)),
+                    dtype=text_emb.dtype,
+                    device=device,
+                )  # [p, dim]
+                conds_text_emb.insert(0, pad)
+                attention_mask[:padding] = 0
+            mel_emb = torch.cat(conds_text_emb)  # [target_len, 1280]
+            assert mel_emb.shape[0] == target_len, (
+                f"mel_emb.shape: {mel_emb.shape}, target_len: {target_len}"
+            )
+            batched_mel_emb.append(mel_emb)
+            attention_masks.append(attention_mask)
+        # [b, s, dim]
+        batched_mel_emb = torch.stack(batched_mel_emb, dim=0)
+        # [b, s+1]
+        attention_mask = torch.stack(attention_masks, dim=0)
+        # [b, s+1]
+        fake_inputs = torch.ones(
+            (
+                batched_mel_emb.shape[0],
+                batched_mel_emb.shape[1] + 1,  # +1 for the start_mel_token
+            ),
+            dtype=torch.long,
+            device=device,
+        )  # [b, target_len+1]
+        fake_inputs[:, -1] = self.start_mel_token
+
+        last_token_emb = self.mel_embedding(
+            torch.tensor([self.start_mel_token], device=device)
+        ).unsqueeze(0)
+        last_token_emb = last_token_emb + self.mel_pos_embedding(last_token_emb)
+        batched_mel_emb = torch.cat(
+            [batched_mel_emb, last_token_emb.repeat(b, 1, 1)], dim=1
+        )
+
+        return fake_inputs, batched_mel_emb, attention_mask
