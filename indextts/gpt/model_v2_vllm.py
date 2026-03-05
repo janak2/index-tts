@@ -99,7 +99,7 @@ class GPT2LMHeadModel(nn.Module):
         else:
             emb = self.embeddings(input_ids)
             emb = emb + self.text_pos_embedding.emb(
-                positions - self.cached_mel_emb.shape[1]
+                positions - self.cached_mel_emb.shape[0] + 1
             )
 
         hidden_states = self.transformer(
@@ -192,6 +192,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
             gpu_memory_utilization=0.6,
+            enforce_eager=True,
         )
 
     def set_text_padding(self, text_input_tokens, text_lengths):
