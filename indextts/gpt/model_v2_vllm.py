@@ -77,12 +77,12 @@ class GPT2LMHeadModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        print(
-            "inputs_embeds.shape",
-            inputs_embeds.shape if inputs_embeds is not None else "None",
-        )
-        print("positions.shape", positions.shape if positions is not None else "None")
-        print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
+        # print(
+        #     "inputs_embeds.shape",
+        #     inputs_embeds.shape if inputs_embeds is not None else "None",
+        # )
+        # print("positions.shape", positions.shape if positions is not None else "None")
+        # print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
 
         if inputs_embeds is not None and inputs_embeds.shape[0] != 1:
             mel_len = inputs_embeds.shape[0]  # target_len
@@ -191,7 +191,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
-            gpu_memory_utilization=0.6,
+            gpu_memory_utilization=0.4,
             enforce_eager=True,
         )
 
@@ -462,7 +462,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         tokens = []
         for o in output:
             tokens.append(o.outputs[0].token_ids)
-        tokens = torch.tensor(tokens)
+        tokens = torch.tensor(tokens, device=speech_conditioning_latent.device)
         return tokens, speech_conditioning_latent
 
     def prepare_gpt_inputs(
