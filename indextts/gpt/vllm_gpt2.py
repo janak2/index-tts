@@ -61,6 +61,8 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 
+from indextts.utils.tensor_logger import save_tensor
+
 
 class GPT2Attention(nn.Module):
     def __init__(
@@ -165,20 +167,38 @@ class GPT2Block(nn.Module):
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPT2MLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
+        self.prefix = prefix
+        self.input_count = -1
 
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         residual = hidden_states
+        if self.prefix == "transformer.h.0":
+            save_tensor(hidden_states, f"run2_residual_1_{self.input_count}.pt")
         hidden_states = self.ln_1(hidden_states)
+        if self.prefix == "transformer.h.0":
+            save_tensor(hidden_states, f"run2_ln_1_{self.input_count}.pt")
         attn_output = self.attn(hidden_states=hidden_states)
+        if self.prefix == "transformer.h.0":
+            save_tensor(attn_output, f"run2_attn_output_{self.input_count}.pt")
         # residual connection
         hidden_states = attn_output + residual
 
         residual = hidden_states
+        if self.prefix == "transformer.h.0":
+            save_tensor(residual, f"run2_residual_2_{self.input_count}.pt")
         hidden_states = self.ln_2(hidden_states)
+        if self.prefix == "transformer.h.0":
+            save_tensor(hidden_states, f"run2_ln_2_{self.input_count}.pt")
         feed_forward_hidden_states = self.mlp(hidden_states)
+        if self.prefix == "transformer.h.0":
+            save_tensor(
+                feed_forward_hidden_states,
+                f"run2_feed_forward_{self.input_count}.pt",
+            )
+        self.input_count += 1
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
         return hidden_states
@@ -214,6 +234,7 @@ class GPT2Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
+        self.input_count = -1
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -225,6 +246,8 @@ class GPT2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        save_tensor(inputs_embeds, f"run2_gpt2_input_{self.input_count}.pt")
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.get_input_embeddings(input_ids)
@@ -234,13 +257,23 @@ class GPT2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for layer in islice(self.h, self.start_layer, self.end_layer):
+        save_tensor(hidden_states, f"run2_pre_layer_{self.input_count}.pt")
+
+        for i, layer in enumerate(islice(self.h, self.start_layer, self.end_layer)):
+            save_tensor(hidden_states, f"run2_block_input_{i}_{self.input_count}.pt")
+            if i == 0 and self.input_count == 0:
+                save_tensor(layer.state_dict(), f"run2_block_{i}_{self.input_count}.pt")
             hidden_states = layer(hidden_states)
+            save_tensor(hidden_states, f"run2_block_output_{i}_{self.input_count}.pt")
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
+        save_tensor(hidden_states, f"run2_pre_ln_f_{self.input_count}.pt")
+
         hidden_states = self.ln_f(hidden_states)
+        self.input_count += 1
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

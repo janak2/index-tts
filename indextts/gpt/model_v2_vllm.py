@@ -1,3 +1,5 @@
+import os
+
 import functools
 import gc
 import torch
@@ -25,10 +27,12 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from typing import Optional, Union, Iterable
-from vllm.model_executor.models.gpt2 import GPT2Model
+from indextts.gpt.vllm_gpt2 import GPT2Model
 from vllm import LLM, SamplingParams
 from vllm import ModelRegistry
 from huggingface_hub import snapshot_download
+
+from indextts.utils.tensor_logger import save_tensor
 
 
 def null_position_embeddings(range, dim, dtype=torch.float32):
@@ -66,6 +70,8 @@ class GPT2LMHeadModel(nn.Module):
         )
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.n_embd)
         self.cached_mel_emb = torch.zeros([0, 0])
+        self.input_count = 0
+        self.warmup = False
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.get_input_embeddings(input_ids)
@@ -92,6 +98,7 @@ class GPT2LMHeadModel(nn.Module):
             mel_emb = inputs_embeds
             emb = torch.cat([mel_emb, text_emb], dim=0)
             self.cached_mel_emb = mel_emb
+            save_tensor(mel_emb, "run2_emb.pt")
         elif positions.shape[0] != 1:
             emb = self.embeddings(input_ids)
             emb = emb + self.text_pos_embedding.emb(positions)
@@ -102,9 +109,16 @@ class GPT2LMHeadModel(nn.Module):
                 positions - self.cached_mel_emb.shape[0] + 1
             )
 
+        self.warmup = inputs_embeds is None
+
+        if not self.warmup:
+            save_tensor(emb, f"run2_input_{self.input_count}.pt")
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds=emb
         )
+        if not self.warmup:
+            save_tensor(hidden_states, f"run2_hidden_states_{self.input_count}.pt")
+
         return hidden_states
 
     def compute_logits(
@@ -117,6 +131,10 @@ class GPT2LMHeadModel(nn.Module):
                 0, sampling_metadata.selected_token_indices
             )
         logits = self.lm_head(hidden_states)
+        if not self.warmup:
+            save_tensor(logits, f"run2_logits_{self.input_count}.pt")
+            self.input_count += 1
+
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -186,7 +204,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         )
         self.inference_model = LLM(
             path,
-            max_model_len=1024,
+            max_model_len=self.max_mel_tokens,
             max_num_seqs=1,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
@@ -451,11 +469,12 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         output = self.inference_model.generate(
             prompt_token_ids,
             sampling_params=SamplingParams(
-                temperature=hf_generate_kwargs.get("temperature", 0.8),
+                temperature=hf_generate_kwargs["temperature"],
                 max_tokens=max_length,
-                top_p=hf_generate_kwargs.get("top_p", 0.8),
-                top_k=hf_generate_kwargs.get("top_k", 30),
-                repetition_penalty=hf_generate_kwargs.get("repetition_penalty", 10.0),
+                best_of=hf_generate_kwargs["num_beams"],
+                top_p=hf_generate_kwargs["top_p"],
+                top_k=hf_generate_kwargs["top_k"],
+                repetition_penalty=hf_generate_kwargs["repetition_penalty"],
                 stop_token_ids=[self.stop_mel_token],
             ),
         )

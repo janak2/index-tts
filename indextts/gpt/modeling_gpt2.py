@@ -54,6 +54,7 @@ from transformers.utils import (
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 
+from indextts.utils.tensor_logger import save_tensor
 
 logger = logging.get_logger(__name__)
 
@@ -453,6 +454,8 @@ class GPT2Block(GradientCheckpointingLayer):
             )
 
         self.mlp = GPT2MLP(inner_dim, config)
+        self.layer_idx = layer_idx
+        self.input_count = 0
 
     def forward(
         self,
@@ -471,7 +474,11 @@ class GPT2Block(GradientCheckpointingLayer):
         Optional[tuple[torch.Tensor, tuple[torch.FloatTensor, ...]]],
     ]:
         residual = hidden_states
+        if self.layer_idx == 0:
+            save_tensor(residual, f"run1_residual_1_{self.input_count}.pt")
         hidden_states = self.ln_1(hidden_states)
+        if self.layer_idx == 0:
+            save_tensor(hidden_states, f"run1_ln_1_{self.input_count}.pt")
         attn_output, self_attn_weights = self.attn(
             hidden_states,
             past_key_value=past_key_value,
@@ -482,6 +489,8 @@ class GPT2Block(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
+        if self.layer_idx == 0:
+            save_tensor(attn_output, f"run1_attn_output_{self.input_count}.pt")
         # residual connection
         hidden_states = attn_output + residual
 
@@ -507,8 +516,17 @@ class GPT2Block(GradientCheckpointingLayer):
             hidden_states = residual + cross_attn_output
 
         residual = hidden_states
+        if self.layer_idx == 0:
+            save_tensor(residual, f"run1_residual_2_{self.input_count}.pt")
         hidden_states = self.ln_2(hidden_states)
+        if self.layer_idx == 0:
+            save_tensor(hidden_states, f"run1_ln_2_{self.input_count}.pt")
         feed_forward_hidden_states = self.mlp(hidden_states)
+        if self.layer_idx == 0:
+            save_tensor(
+                feed_forward_hidden_states, f"run1_feed_forward_{self.input_count}.pt"
+            )
+        self.input_count += 1
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 
@@ -796,6 +814,7 @@ class GPT2Model(GPT2PreTrainedModel):
         self.device_map = None
         self.gradient_checkpointing = False
         self._attn_implementation = config._attn_implementation
+        self.input_count = 0
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -896,6 +915,8 @@ class GPT2Model(GPT2PreTrainedModel):
 
             [What are input IDs?](../glossary#input-ids)
         """
+        if inputs_embeds is not None:
+            save_tensor(inputs_embeds, f"run1_gpt2_input_{self.input_count}.pt")
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1036,6 +1057,9 @@ class GPT2Model(GPT2PreTrainedModel):
             () if output_attentions and self.config.add_cross_attention else None
         )
         all_hidden_states = () if output_hidden_states else None
+
+        save_tensor(hidden_states, f"run1_pre_layer_{self.input_count}.pt")
+
         for i, block in enumerate(self.h):
             # Model parallel
             if self.model_parallel:
@@ -1044,6 +1068,8 @@ class GPT2Model(GPT2PreTrainedModel):
                     head_mask = head_mask.to(hidden_states.device)
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+
+            save_tensor(hidden_states, f"run1_block_input_{i}_{self.input_count}.pt")
 
             outputs = block(
                 hidden_states,
@@ -1059,8 +1085,12 @@ class GPT2Model(GPT2PreTrainedModel):
                 output_attentions=output_attentions,
                 **kwargs,
             )
+            if i == 0 and self.input_count == 0:
+                save_tensor(block.state_dict(), f"run1_block_{i}_{self.input_count}.pt")
 
             hidden_states = outputs[0]
+
+            save_tensor(hidden_states, f"run1_block_output_{i}_{self.input_count}.pt")
 
             if output_attentions:
                 all_self_attentions = all_self_attentions + (outputs[1],)
@@ -1073,6 +1103,7 @@ class GPT2Model(GPT2PreTrainedModel):
                     if i == v[-1] and "cuda:" + str(k) != self.last_device:
                         hidden_states = hidden_states.to("cuda:" + str(k + 1))
 
+        save_tensor(hidden_states, f"run1_pre_ln_f_{self.input_count}.pt")
         hidden_states = self.ln_f(hidden_states)
 
         hidden_states = hidden_states.view(output_shape)
@@ -1087,6 +1118,9 @@ class GPT2Model(GPT2PreTrainedModel):
                 if self.config.add_cross_attention
                 else past_key_values.to_legacy_cache()
             )
+
+        self.input_count += 1
+
         if not return_dict:
             return tuple(
                 v

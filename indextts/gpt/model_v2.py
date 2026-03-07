@@ -16,10 +16,15 @@ from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
+from indextts.utils.tensor_logger import save_tensor
 
 
-def null_position_embeddings(range, dim):
-    return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
+def null_position_embeddings(range, dim, dtype=torch.float32):
+    if range.ndim == 1:
+        return torch.zeros((range.shape[0], dim), device=range.device, dtype=dtype)
+    return torch.zeros(
+        (range.shape[0], range.shape[1], dim), device=range.device, dtype=dtype
+    )
 
 
 class ResBlock(nn.Module):
@@ -59,6 +64,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
         self.cached_mel_emb = None
+        self.input_count = 0
 
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -156,12 +162,16 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 )
             else:  # this outcome only occurs once per loop in most cases
                 mel_emb = self.cached_mel_emb
+
             emb = torch.cat([mel_emb, text_emb], dim=1)
+            save_tensor(emb, "run1_emb.pt")
         else:
             emb = self.embeddings(input_ids)
             emb = emb + self.text_pos_embedding.get_fixed_embedding(
                 attention_mask.shape[1] - mel_len, attention_mask.device
             )
+
+        save_tensor(emb, f"run1_input_{self.input_count}.pt")
         transformer_outputs = self.transformer(
             inputs_embeds=emb,
             past_key_values=past_key_values,
@@ -186,7 +196,11 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 torch.cuda.set_device(self.transformer.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
+        save_tensor(hidden_states, f"run1_hidden_states_{self.input_count}.pt")
         lm_logits = self.lm_head(hidden_states)
+
+        save_tensor(lm_logits, f"run1_logits_{self.input_count}.pt")
+        self.input_count += 1
 
         if not return_dict:
             return (lm_logits,) + transformer_outputs[1:]
@@ -262,12 +276,19 @@ class LearnedPositionEmbeddings(nn.Module):
 
 
 def build_hf_gpt_transformer(
-    layers, model_dim, heads, max_mel_seq_len, max_text_seq_len, checkpointing
+    layers,
+    model_dim,
+    heads,
+    max_mel_seq_len,
+    max_text_seq_len,
+    checkpointing,
+    use_fp16=False,
 ):
     """
     GPT-2 implemented by the HuggingFace library.
     """
-    from transformers import GPT2Config, GPT2Model
+    from transformers import GPT2Config
+    from indextts.gpt.modeling_gpt2 import GPT2Model
 
     gpt_config = GPT2Config(
         vocab_size=256,  # Unused.
@@ -282,7 +303,11 @@ def build_hf_gpt_transformer(
     gpt = GPT2Model(gpt_config)
     # Override the built in positional embeddings
     del gpt.wpe
-    gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
+    gpt.wpe = functools.partial(
+        null_position_embeddings,
+        dim=model_dim,
+        dtype=torch.float16 if use_fp16 else torch.float32,
+    )
     # Built-in token embeddings are unused.
     del gpt.wte
     return (
@@ -349,6 +374,7 @@ class UnifiedVoice(nn.Module):
         condition_module=None,
         emo_condition_module=None,
         use_accel=False,
+        use_fp16=False,
     ):
         """
         Args:
@@ -388,6 +414,7 @@ class UnifiedVoice(nn.Module):
         self.cond_num = condition_num_latent
         self.cond_mask_pad = nn.ConstantPad1d((self.cond_num, 0), True)
         self.emo_cond_mask_pad = nn.ConstantPad1d((1, 0), True)
+        self.use_fp16 = use_fp16
         if condition_type == "perceiver":
             self.conditioning_encoder = ConditioningEncoder(
                 1024, model_dim, num_attn_heads=heads
@@ -459,6 +486,7 @@ class UnifiedVoice(nn.Module):
             self.max_mel_tokens + 2 + self.max_conditioning_inputs,
             self.max_text_tokens + 2,
             checkpointing,
+            use_fp16,
         )
         if train_solo_embeddings:
             self.mel_solo_embedding = nn.Parameter(
@@ -500,6 +528,7 @@ class UnifiedVoice(nn.Module):
             gradient_checkpointing=False,
             use_cache=True,
         )
+        self.use_half = half
 
         if self.use_accel and torch.cuda.is_available():
             # Check if flash attention is available
@@ -936,6 +965,8 @@ class UnifiedVoice(nn.Module):
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(
             conds_latent, text_inputs
         )  # [b, target_len+1], [b, target_len, 1280], [b, target_len+1] # target_len = 34 + L + 2
+        if self.use_half:
+            inputs_embeds = inputs_embeds.half()
         self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
             inputs = input_ids

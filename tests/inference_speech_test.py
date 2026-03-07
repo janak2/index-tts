@@ -76,9 +76,13 @@ class InferenceSpeechTest(IndexTTS2VLLM):
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
 
         if use_vllm:
-            self.gpt = UnifiedVoiceVLLM(**self.cfg.gpt, use_accel=self.use_accel)
+            self.gpt = UnifiedVoiceVLLM(
+                **self.cfg.gpt, use_accel=self.use_accel, use_fp16=self.use_fp16
+            )
         else:
-            self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
+            self.gpt = UnifiedVoice(
+                **self.cfg.gpt, use_accel=self.use_accel, use_fp16=self.use_fp16
+            )
 
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
@@ -92,7 +96,7 @@ class InferenceSpeechTest(IndexTTS2VLLM):
             use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16
         )
 
-        print(torch.cuda.memory_summary(device=self.device, abbreviated=False))
+        # print(torch.cuda.memory_summary(device=self.device, abbreviated=False))
 
     def test_inference(
         self,
@@ -220,6 +224,7 @@ if __name__ == "__main__":
     codes, speech_conditioning_latent = tts.test_inference(
         spk_audio_prompt=prompt_wav,
         text=text,
+        num_beams=1,
     )
     print(codes.shape)
     print(speech_conditioning_latent.shape)
