@@ -23,6 +23,8 @@ import safetensors
 from transformers import SeamlessM4TFeatureExtractor
 from subprocess import CalledProcessError
 
+import gc
+
 
 class IndexTTS2VLLM(IndexTTS2):
     def __init__(
@@ -49,6 +51,8 @@ class IndexTTS2VLLM(IndexTTS2):
             use_accel (bool): whether to use acceleration engine for GPT2 or not.
             use_torch_compile (bool): whether to use torch.compile for optimization or not.
         """
+        torch.cuda.memory._record_memory_history(max_entries=100000)
+
         if device is not None:
             self.device = device
             self.use_fp16 = False if device == "cpu" else use_fp16
@@ -83,8 +87,16 @@ class IndexTTS2VLLM(IndexTTS2):
         self.use_torch_compile = use_torch_compile
         self.use_int8 = use_int8
 
+        def _gpu_mem_gb():
+            if torch.cuda.is_available():
+                return torch.cuda.memory_allocated() / (1024**3)
+            return 0.0
+
+        print(f">> [GPU mem] before UnifiedVoiceVLLM load: {_gpu_mem_gb():.2f} GB")
         self.gpt = UnifiedVoiceVLLM(**self.cfg.gpt, use_accel=self.use_accel)
+        print(f">> [GPU mem] after UnifiedVoiceVLLM load: {_gpu_mem_gb():.2f} GB")
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
+        print(f">> [GPU mem] before load_checkpoint: {_gpu_mem_gb():.2f} GB")
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
         if self.use_fp16:
@@ -95,7 +107,22 @@ class IndexTTS2VLLM(IndexTTS2):
         gpt_size_gb = sum(
             p.numel() * p.element_size() for p in self.gpt.parameters()
         ) / (1024**3)
+
+        for name, module in self.gpt.named_children():
+            mem_gb = sum(p.numel() * p.element_size() for p in module.parameters()) / (
+                1024**3
+            )
+            print(f">> [GPT member] {name}: {mem_gb:.4f} GB")
+
+        del self.gpt.gpt
+        del self.gpt.mel_layer_pos_embedding
+        del self.gpt.text_layer_pos_embedding
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
         print(f">> GPT size: {gpt_size_gb:.2f} GB")
+        print(f">> [GPU mem] after GPT load: {_gpu_mem_gb():.2f} GB")
 
         if use_deepspeed:
             try:
@@ -106,9 +133,11 @@ class IndexTTS2VLLM(IndexTTS2):
                     f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}"
                 )
 
+        print(f">> [GPU mem] before post_init_gpt2_config: {_gpu_mem_gb():.2f} GB")
         self.gpt.post_init_gpt2_config(
             use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16
         )
+        print(f">> [GPU mem] after post_init_gpt2_config: {_gpu_mem_gb():.2f} GB")
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
@@ -132,6 +161,7 @@ class IndexTTS2VLLM(IndexTTS2):
             "facebook/w2v-bert-2.0"
         )
 
+        print(f">> [GPU mem] before semantic_model load: {_gpu_mem_gb():.2f} GB")
         self.semantic_model, self.semantic_mean, self.semantic_std = (
             build_semantic_model(
                 os.path.join(self.model_dir, self.cfg.w2v_stat), use_int8=self.use_int8
@@ -156,7 +186,9 @@ class IndexTTS2VLLM(IndexTTS2):
             p.numel() * p.element_size() for p in self.semantic_model.parameters()
         ) / (1024**3)
         print(f">> semantic_model size: {semantic_model_size_gb:.2f} GB")
+        print(f">> [GPU mem] after semantic_model load: {_gpu_mem_gb():.2f} GB")
 
+        print(f">> [GPU mem] before semantic_codec load: {_gpu_mem_gb():.2f} GB")
         semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
         semantic_code_ckpt = hf_hub_download(
             "amphion/MaskGCT", filename="semantic_codec/model.safetensors"
@@ -170,7 +202,9 @@ class IndexTTS2VLLM(IndexTTS2):
             p.numel() * p.element_size() for p in self.semantic_codec.parameters()
         ) / (1024**3)
         print(f">> semantic_codec size: {semantic_codec_size_gb:.2f} GB")
+        print(f">> [GPU mem] after semantic_codec load: {_gpu_mem_gb():.2f} GB")
 
+        print(f">> [GPU mem] before s2mel load: {_gpu_mem_gb():.2f} GB")
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
         s2mel, _, _, _ = load_checkpoint2(
@@ -189,6 +223,7 @@ class IndexTTS2VLLM(IndexTTS2):
             p.numel() * p.element_size() for p in self.s2mel.parameters()
         ) / (1024**3)
         print(f">> s2mel size: {s2mel_size_gb:.2f} GB")
+        print(f">> [GPU mem] after s2mel load: {_gpu_mem_gb():.2f} GB")
 
         # Enable torch.compile optimization if requested
         if self.use_torch_compile:
@@ -200,6 +235,7 @@ class IndexTTS2VLLM(IndexTTS2):
         print(">> s2mel weights restored from:", s2mel_path)
 
         # load campplus_model
+        print(f">> [GPU mem] before campplus_model load: {_gpu_mem_gb():.2f} GB")
         campplus_ckpt_path = hf_hub_download(
             "funasr/campplus", filename="campplus_cn_common.bin"
         )
@@ -215,13 +251,16 @@ class IndexTTS2VLLM(IndexTTS2):
             p.numel() * p.element_size() for p in self.campplus_model.parameters()
         ) / (1024**3)
         print(f">> campplus_model size: {campplus_model_size_gb:.2f} GB")
+        print(f">> [GPU mem] after campplus_model load: {_gpu_mem_gb():.2f} GB")
 
+        print(f">> [GPU mem] before bigvgan load: {_gpu_mem_gb():.2f} GB")
         bigvgan_name = self.cfg.vocoder.name
         self.bigvgan = bigvgan.BigVGAN.from_pretrained(
             bigvgan_name, use_cuda_kernel=self.use_cuda_kernel
         )
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
+
         self.bigvgan.eval()
         print(">> bigvgan weights restored from:", bigvgan_name)
 
@@ -229,6 +268,7 @@ class IndexTTS2VLLM(IndexTTS2):
             p.numel() * p.element_size() for p in self.bigvgan.parameters()
         ) / (1024**3)
         print(f">> bigvgan size: {bigvgan_size_gb:.2f} GB")
+        print(f">> [GPU mem] after bigvgan load: {_gpu_mem_gb():.2f} GB")
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer(enable_glossary=True)
@@ -284,6 +324,9 @@ class IndexTTS2VLLM(IndexTTS2):
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+
+        torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     def infer_vllm(
         self,

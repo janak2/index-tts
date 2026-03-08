@@ -186,13 +186,6 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         super().__init__(*args, **kwargs)
 
     def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
-        del self.gpt
-        del self.mel_layer_pos_embedding
-        del self.text_layer_pos_embedding
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
         path = snapshot_download(
             "janak22/index-tts-gpt",
             ignore_patterns=["*.tflite", "*.onnx", "*.msgpack", "*.ot", "*.h5"],
