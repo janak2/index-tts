@@ -596,7 +596,7 @@ class IndexTTS2VLLM(IndexTTS2):
         temperature = generation_kwargs.pop("temperature", 0.8)
         autoregressive_batch_size = 1
         length_penalty = generation_kwargs.pop("length_penalty", 0.0)
-        num_beams = generation_kwargs.pop("num_beams", 3)
+        num_beams = generation_kwargs.pop("num_beams", 1)
         repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
         max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
         sampling_rate = 22050

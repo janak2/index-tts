@@ -192,8 +192,8 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         )
         self.inference_model = LLM(
             path,
-            max_model_len=self.max_mel_tokens,
-            max_num_seqs=1,
+            max_model_len=self.max_mel_tokens + 2 + self.max_conditioning_inputs,
+            # max_num_seqs=1,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
@@ -201,147 +201,6 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             enforce_eager=True,
         )
 
-    def set_text_padding(self, text_input_tokens, text_lengths):
-        """
-        Given mel tokens that are derived from a padded audio clip and the actual lengths of each batch element in
-        that audio clip, reformats the tokens with STOP_MEL_TOKEN in place of the zero padding. This is required
-        preformatting to create a working TTS model.
-        """
-        for b in range(len(text_lengths)):
-            # Due to the convolutional nature of how these tokens are generated,
-            # it would be best if the model predicts a token past the actual last token.
-            actual_end = text_lengths[b]
-            if actual_end < text_input_tokens.shape[-1]:
-                text_input_tokens[b, actual_end:] = self.stop_text_token
-        return text_input_tokens
-
-    def get_logits(
-        self,
-        speech_conditioning_inputs,  # [1, 34, 1280]
-        first_inputs,  # [1, L+2, 1280]
-        first_head,
-        second_inputs=None,  # [1, L'+2, 1280]
-        second_head=None,
-        get_attns=False,
-        return_latent=False,
-    ):
-        if second_inputs is not None:
-            emb = torch.cat(
-                [speech_conditioning_inputs, first_inputs, second_inputs], dim=1
-            )  # [1, 34+L+2+L'+2, 1280]
-        else:
-            emb = torch.cat([speech_conditioning_inputs, first_inputs], dim=1)
-
-        gpt_out = self.gpt(
-            inputs_embeds=emb, return_dict=True, output_attentions=get_attns
-        )
-        if get_attns:
-            return gpt_out.attentions
-
-        offset = speech_conditioning_inputs.shape[1]  # 34
-        enc = gpt_out.last_hidden_state[
-            :, offset:
-        ]  # [1, L+2+L'+2 +34, 1280] -> [1, L+2+L'+2, 1280]
-        enc = self.final_norm(enc)
-
-        if return_latent:
-            return enc[:, : first_inputs.shape[1]], enc[
-                :, -second_inputs.shape[1] :
-            ]  # [1, L+2, 1280], [1, L'+2, 1280]
-
-        first_logits = enc[:, : first_inputs.shape[1]]
-        first_logits = first_head(first_logits)
-        first_logits = first_logits.permute(0, 2, 1)
-        if second_inputs is not None:
-            second_logits = enc[:, -second_inputs.shape[1] :]
-            second_logits = second_head(second_logits)
-            second_logits = second_logits.permute(0, 2, 1)
-            return first_logits, second_logits
-        else:
-            return first_logits
-
-    def forward(
-        self,
-        speech_conditioning_latent,  # [1, 32, 1280]
-        text_inputs,  # [1, L]
-        text_lengths,
-        mel_codes,  # [1, L']
-        mel_codes_lengths,
-        emo_speech_conditioning_latent,
-        cond_mel_lengths=None,
-        emo_cond_mel_lengths=None,
-        emo_vec=None,
-        use_speed=None,
-        do_spk_cond=False,
-    ):
-        """
-        Forward pass that uses both text and voice in either text conditioning mode or voice conditioning mode
-
-        speech_conditioning_input: MEL float tensor, (b,1024)
-        text_inputs: long tensor, (b,t)
-        text_lengths: long tensor, (b,)
-        mel_inputs:  long tensor, (b,m)
-        wav_lengths: long tensor, (b,)
-
-        If return_attentions is specified, only logits are returned.
-        If return_latent is specified, loss & logits are not computed or returned. Only the predicted latents are returned.
-        """
-
-        if do_spk_cond:
-            speech_conditioning_latent = self.get_conditioning(
-                speech_conditioning_latent.transpose(1, 2), cond_mel_lengths
-            )
-        else:
-            speech_conditioning_latent = speech_conditioning_latent
-
-        if emo_vec is None:
-            emo_vec_syn_ori = self.get_emo_conditioning(
-                emo_speech_conditioning_latent.transpose(1, 2), emo_cond_mel_lengths
-            )
-            emo_vec_syn = self.emovec_layer(emo_vec_syn_ori)
-            emo_vec = self.emo_layer(emo_vec_syn)
-
-        text_inputs = self.set_text_padding(text_inputs, text_lengths)
-        text_inputs = F.pad(text_inputs, (0, 1), value=self.stop_text_token)  # [1,L+1]
-
-        mel_codes = self.set_mel_padding(mel_codes, mel_codes_lengths)
-        mel_codes = F.pad(mel_codes, (0, 1), value=self.stop_mel_token)  # [1, L'+1]
-
-        duration_emb = self.speed_emb(torch.zeros_like(use_speed))
-        duration_emb_half = self.speed_emb(torch.ones_like(use_speed))
-        conds = torch.cat(
-            (
-                speech_conditioning_latent + emo_vec.unsqueeze(1),
-                duration_emb_half.unsqueeze(1),
-                duration_emb.unsqueeze(1),
-            ),
-            1,
-        )  # [1, 34, 1280]
-        text_inputs, text_targets = self.build_aligned_inputs_and_targets(
-            text_inputs, self.start_text_token, self.stop_text_token
-        )  # [1, L+2], [1, L+2]
-        text_emb = self.text_embedding(text_inputs) + self.text_pos_embedding(
-            text_inputs
-        )  # [1, L+2, 1280]
-        mel_codes, mel_targets = self.build_aligned_inputs_and_targets(
-            mel_codes, self.start_mel_token, self.stop_mel_token
-        )  # [1, L'+2], [1, L'+2]
-
-        mel_emb = self.mel_embedding(mel_codes)  # []
-        mel_emb = mel_emb + self.mel_pos_embedding(mel_codes)
-
-        text_logits, mel_logits = self.get_logits(
-            conds,
-            text_emb,
-            self.text_head,
-            mel_emb,
-            self.mel_head,
-            get_attns=False,
-            return_latent=True,
-        )  # [1, L+2, 1280], [1, L'+2, 1280]
-        return mel_logits[
-            :, :-2
-        ]  # Despite the name, these are not logits. Strip off the two tokens added by this forward pass.
 
     def inference_speech(
         self,
@@ -444,9 +303,9 @@ class UnifiedVoiceVLLM(UnifiedVoice):
                 )
             )
         max_length = (
-            (trunc_index + self.max_mel_tokens - 1)
+            (self.max_mel_tokens + 2 + self.max_conditioning_inputs - trunc_index - 1)
             if max_generate_length is None
-            else trunc_index + max_generate_length
+            else max_generate_length
         )
 
         prompt_token_ids = [
