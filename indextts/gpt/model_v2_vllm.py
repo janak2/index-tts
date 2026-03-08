@@ -83,35 +83,27 @@ class GPT2LMHeadModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # print(
-        #     "inputs_embeds.shape",
-        #     inputs_embeds.shape if inputs_embeds is not None else "None",
-        # )
-        # print("positions.shape", positions.shape if positions is not None else "None")
-        # print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
+        print(
+            "inputs_embeds.shape",
+            inputs_embeds.shape if inputs_embeds is not None else "None",
+        )
+        print("positions.shape", positions.shape if positions is not None else "None")
+        print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
+        print("cached_mel_emb.shape", self.cached_mel_emb.shape if self.cached_mel_emb is not None else "None")
 
-        if inputs_embeds is not None and inputs_embeds.shape[0] != 1:
-            mel_len = inputs_embeds.shape[0]  # target_len
-            text_inputs = input_ids[mel_len:]
-            text_emb = self.embeddings(text_inputs)
-            text_emb = text_emb + self.text_pos_embedding(text_emb.unsqueeze(0))
-            mel_emb = inputs_embeds
-            emb = torch.cat([mel_emb, text_emb], dim=0)
-            self.cached_mel_emb = mel_emb
-        elif positions.shape[0] != 1:
+        # warmup or cuda graph capture
+        if inputs_embeds is None:
             emb = self.embeddings(input_ids)
-            emb = emb + self.text_pos_embedding.emb(positions)
-        elif inputs_embeds is not None:
+            emb = emb + self.text_pos_embedding.emb(
+                positions
+            )
+        elif inputs_embeds.shape[0] != 1:
+            self.cached_mel_emb = inputs_embeds
+            emb = inputs_embeds
+        else:
             emb = inputs_embeds + self.text_pos_embedding.emb(
                 positions - self.cached_mel_emb.shape[0] + 2
             )
-        else:
-            emb = self.embeddings(input_ids)
-            emb = emb + self.text_pos_embedding.emb(
-                positions - self.cached_mel_emb.shape[0] + 1
-            )
-
-        self.warmup = inputs_embeds is None
 
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds=emb
@@ -193,12 +185,12 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         self.inference_model = LLM(
             path,
             max_model_len=self.max_mel_tokens + 2 + self.max_conditioning_inputs,
-            # max_num_seqs=1,
+            max_num_seqs=8,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
             gpu_memory_utilization=0.35,
-            enforce_eager=True,
+            # enforce_eager=True,
         )
 
 
@@ -313,6 +305,7 @@ class UnifiedVoiceVLLM(UnifiedVoice):
             for p in input_ids
         ]
 
+        print("Starting generation")
         output = self.inference_model.generate(
             prompt_token_ids,
             sampling_params=SamplingParams(
