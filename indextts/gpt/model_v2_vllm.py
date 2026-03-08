@@ -97,9 +97,12 @@ class GPT2LMHeadModel(nn.Module):
             emb = emb + self.text_pos_embedding.emb(
                 positions
             )
+        # prefill
         elif inputs_embeds.shape[0] != 1:
             self.cached_mel_emb = inputs_embeds
             emb = inputs_embeds
+
+        # decode
         else:
             emb = inputs_embeds + self.text_pos_embedding.emb(
                 positions - self.cached_mel_emb.shape[0] + 2
