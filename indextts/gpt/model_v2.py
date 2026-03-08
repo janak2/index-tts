@@ -523,7 +523,6 @@ class UnifiedVoice(nn.Module):
             gradient_checkpointing=False,
             use_cache=True,
         )
-        self.use_half = half
 
         if self.use_accel and torch.cuda.is_available():
             # Check if flash attention is available
@@ -960,7 +959,7 @@ class UnifiedVoice(nn.Module):
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(
             conds_latent, text_inputs
         )  # [b, target_len+1], [b, target_len, 1280], [b, target_len+1] # target_len = 34 + L + 2
-        if self.use_half:
+        if self.use_fp16:
             inputs_embeds = inputs_embeds.half()
         self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
