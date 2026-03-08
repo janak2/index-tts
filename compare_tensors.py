@@ -203,6 +203,9 @@ if __name__ == "__main__":
 
     print(torch.equal(t1, t2))  # exact match
     print(torch.allclose(t1, t2, atol=1e-6))  # approximate match
+    print(t1.max(), t2.max())
+    # print the index of max element
+    print(t1.max(dim=-1)[1], t2.max(dim=-1)[1])
     print((t1 - t2).abs().max())  # max absolute difference
     print((t1 - t2).abs().mean())  # mean absolute difference
 

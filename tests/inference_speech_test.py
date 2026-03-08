@@ -39,6 +39,7 @@ class InferenceSpeechTest(IndexTTS2VLLM):
         self.use_accel = use_accel
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.float16 if self.use_fp16 else None
+        self.use_vllm = use_vllm
 
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained(
             "facebook/w2v-bert-2.0"
@@ -75,7 +76,7 @@ class InferenceSpeechTest(IndexTTS2VLLM):
         self.normalizer.load()
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
 
-        if use_vllm:
+        if self.use_vllm:
             self.gpt = UnifiedVoiceVLLM(
                 **self.cfg.gpt, use_accel=self.use_accel, use_fp16=self.use_fp16
             )
@@ -189,7 +190,7 @@ class InferenceSpeechTest(IndexTTS2VLLM):
                             [emo_cond_emb.shape[-1]], device=text_tokens.device
                         ),
                         emo_vec=emovec,
-                        do_sample=True,
+                        do_sample=False,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -200,6 +201,12 @@ class InferenceSpeechTest(IndexTTS2VLLM):
                         max_generate_length=max_mel_tokens,
                         **generation_kwargs,
                     )  # [1, L'], [1, 32, 1280]
+
+                    # save codes as txt
+                    with open(
+                        f"codes_{'vllm' if self.use_vllm else 'gpt'}.txt", "w"
+                    ) as f:
+                        f.write(codes.tolist().__str__())
 
                     return codes, speech_conditioning_latent
 

@@ -164,14 +164,12 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 mel_emb = self.cached_mel_emb
 
             emb = torch.cat([mel_emb, text_emb], dim=1)
-            save_tensor(emb, "run1_emb.pt")
         else:
             emb = self.embeddings(input_ids)
             emb = emb + self.text_pos_embedding.get_fixed_embedding(
                 attention_mask.shape[1] - mel_len, attention_mask.device
             )
 
-        save_tensor(emb, f"run1_input_{self.input_count}.pt")
         transformer_outputs = self.transformer(
             inputs_embeds=emb,
             past_key_values=past_key_values,
@@ -196,10 +194,8 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 torch.cuda.set_device(self.transformer.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
-        save_tensor(hidden_states, f"run1_hidden_states_{self.input_count}.pt")
         lm_logits = self.lm_head(hidden_states)
 
-        save_tensor(lm_logits, f"run1_logits_{self.input_count}.pt")
         self.input_count += 1
 
         if not return_dict:
@@ -287,8 +283,7 @@ def build_hf_gpt_transformer(
     """
     GPT-2 implemented by the HuggingFace library.
     """
-    from transformers import GPT2Config
-    from indextts.gpt.modeling_gpt2 import GPT2Model
+    from transformers import GPT2Config, GPT2Model
 
     gpt_config = GPT2Config(
         vocab_size=256,  # Unused.
