@@ -1,29 +1,26 @@
-from indextts.infer_v2 import IndexTTS2, find_most_similar_cosine
+import gc
 import os
-import time
 import random
+import time
 import warnings
-import torch
-import torchaudio
-
-from omegaconf import OmegaConf
-
-from indextts.gpt.model_v2_vllm import UnifiedVoiceVLLM
-from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
-from indextts.utils.checkpoint import load_checkpoint
-from indextts.utils.front import TextNormalizer, TextTokenizer
-
-from indextts.s2mel.modules.commons import load_checkpoint2, MyModel
-from indextts.s2mel.modules.bigvgan import bigvgan
-from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
-from indextts.s2mel.modules.audio import mel_spectrogram
-
-from huggingface_hub import hf_hub_download
-import safetensors
-from transformers import SeamlessM4TFeatureExtractor
 from subprocess import CalledProcessError
 
-import gc
+import safetensors
+import torch
+import torchaudio
+from huggingface_hub import hf_hub_download
+from omegaconf import OmegaConf
+from transformers import SeamlessM4TFeatureExtractor
+
+from indextts.gpt.model_v2_vllm import UnifiedVoiceVLLM
+from indextts.infer_v2 import IndexTTS2, find_most_similar_cosine
+from indextts.s2mel.modules.audio import mel_spectrogram
+from indextts.s2mel.modules.bigvgan import bigvgan
+from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
+from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+from indextts.utils.checkpoint import load_checkpoint
+from indextts.utils.front import TextNormalizer, TextTokenizer
+from indextts.utils.maskgct_utils import build_semantic_codec, build_semantic_model
 
 
 class IndexTTS2VLLM(IndexTTS2):
@@ -786,7 +783,6 @@ class IndexTTS2VLLM(IndexTTS2):
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
-                wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
                     print(
                         f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max()
@@ -827,7 +823,7 @@ class IndexTTS2VLLM(IndexTTS2):
                 print(">> remove old wav file:", output_path)
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
+            torchaudio.save(output_path, wav, sampling_rate)
             print(">> wav file saved to:", output_path)
             if stream_return:
                 return None
@@ -836,7 +832,7 @@ class IndexTTS2VLLM(IndexTTS2):
             if stream_return:
                 return None
             # 返回以符合Gradio的格式要求
-            wav_data = wav.type(torch.int16)
+            wav_data = wav
             wav_data = wav_data.numpy().T
             yield (sampling_rate, wav_data)
 
