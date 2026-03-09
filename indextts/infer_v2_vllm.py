@@ -48,7 +48,6 @@ class IndexTTS2VLLM(IndexTTS2):
             use_accel (bool): whether to use acceleration engine for GPT2 or not.
             use_torch_compile (bool): whether to use torch.compile for optimization or not.
         """
-        torch.cuda.memory._record_memory_history(max_entries=100000)
 
         if device is not None:
             self.device = device
@@ -321,9 +320,6 @@ class IndexTTS2VLLM(IndexTTS2):
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
-
-        torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
-        torch.cuda.memory._record_memory_history(enabled=None)
 
     def infer_vllm(
         self,
