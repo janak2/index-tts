@@ -31,3 +31,7 @@ desktop.ini
 /outputs/
 
 traces/
+gen.wav
+tensors/
+run1.txt
+run2.txt

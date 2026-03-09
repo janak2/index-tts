@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 import transformers
 from transformers import GPT2Config, LogitsProcessorList
-from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
+from indextts.gpt.model import GPT2PreTrainedModel
+# from transformers.models.gpt2.modeling_gpt2 import GPT2PreTrainedModel
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
@@ -16,10 +17,15 @@ from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
+from indextts.utils.tensor_logger import save_tensor
 
 
-def null_position_embeddings(range, dim):
-    return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
+def null_position_embeddings(range, dim, dtype=torch.float32):
+    if range.ndim == 1:
+        return torch.zeros((range.shape[0], dim), device=range.device, dtype=dtype)
+    return torch.zeros(
+        (range.shape[0], range.shape[1], dim), device=range.device, dtype=dtype
+    )
 
 
 class ResBlock(nn.Module):
@@ -51,6 +57,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         self.text_pos_embedding = text_pos_emb
         self.embeddings = embeddings
         self.final_norm = norm
+        self.mel_head = linear
         self.lm_head = nn.Sequential(norm, linear)
         self.kv_cache = kv_cache
 
@@ -58,6 +65,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
         self.cached_mel_emb = None
+        self.input_count = 0
 
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -90,12 +98,20 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
     def store_mel_emb(self, mel_emb):
         self.cached_mel_emb = mel_emb
 
+    def _past_key_values_has_content(self, past_key_values):
+        if past_key_values is None:
+            return False
+        if hasattr(past_key_values, "get_seq_length"):
+            return past_key_values.get_seq_length() > 0
+        return bool(past_key_values)
+
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         token_type_ids = kwargs.get("token_type_ids", None)  # usually None
         if not self.kv_cache:
             past_key_values = None
+        has_past = self._past_key_values_has_content(past_key_values)
         # only last token for inputs_ids if past is defined in kwargs
-        if past_key_values:
+        if has_past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
@@ -107,7 +123,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            if past_key_values:
+            if has_past:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
             position_ids = None
@@ -155,12 +171,14 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 )
             else:  # this outcome only occurs once per loop in most cases
                 mel_emb = self.cached_mel_emb
+
             emb = torch.cat([mel_emb, text_emb], dim=1)
         else:
             emb = self.embeddings(input_ids)
             emb = emb + self.text_pos_embedding.get_fixed_embedding(
                 attention_mask.shape[1] - mel_len, attention_mask.device
             )
+
         transformer_outputs = self.transformer(
             inputs_embeds=emb,
             past_key_values=past_key_values,
@@ -186,6 +204,8 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
         lm_logits = self.lm_head(hidden_states)
+
+        self.input_count += 1
 
         if not return_dict:
             return (lm_logits,) + transformer_outputs[1:]
@@ -261,7 +281,13 @@ class LearnedPositionEmbeddings(nn.Module):
 
 
 def build_hf_gpt_transformer(
-    layers, model_dim, heads, max_mel_seq_len, max_text_seq_len, checkpointing
+    layers,
+    model_dim,
+    heads,
+    max_mel_seq_len,
+    max_text_seq_len,
+    checkpointing,
+    use_fp16=False,
 ):
     """
     GPT-2 implemented by the HuggingFace library.
@@ -281,7 +307,11 @@ def build_hf_gpt_transformer(
     gpt = GPT2Model(gpt_config)
     # Override the built in positional embeddings
     del gpt.wpe
-    gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
+    gpt.wpe = functools.partial(
+        null_position_embeddings,
+        dim=model_dim,
+        dtype=torch.float16 if use_fp16 else torch.float32,
+    )
     # Built-in token embeddings are unused.
     del gpt.wte
     return (
@@ -348,6 +378,7 @@ class UnifiedVoice(nn.Module):
         condition_module=None,
         emo_condition_module=None,
         use_accel=False,
+        use_fp16=False,
     ):
         """
         Args:
@@ -387,6 +418,7 @@ class UnifiedVoice(nn.Module):
         self.cond_num = condition_num_latent
         self.cond_mask_pad = nn.ConstantPad1d((self.cond_num, 0), True)
         self.emo_cond_mask_pad = nn.ConstantPad1d((1, 0), True)
+        self.use_fp16 = use_fp16
         if condition_type == "perceiver":
             self.conditioning_encoder = ConditioningEncoder(
                 1024, model_dim, num_attn_heads=heads
@@ -458,6 +490,7 @@ class UnifiedVoice(nn.Module):
             self.max_mel_tokens + 2 + self.max_conditioning_inputs,
             self.max_text_tokens + 2,
             checkpointing,
+            use_fp16,
         )
         if train_solo_embeddings:
             self.mel_solo_embedding = nn.Parameter(
@@ -935,6 +968,8 @@ class UnifiedVoice(nn.Module):
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(
             conds_latent, text_inputs
         )  # [b, target_len+1], [b, target_len, 1280], [b, target_len+1] # target_len = 34 + L + 2
+        if self.use_fp16:
+            inputs_embeds = inputs_embeds.half()
         self.inference_model.store_mel_emb(inputs_embeds)
         if input_tokens is None:
             inputs = input_ids

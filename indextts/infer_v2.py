@@ -5,35 +5,33 @@ os.environ["HF_HUB_CACHE"] = "./checkpoints/hf_cache"
 import json
 import re
 import time
+import warnings
+
 import librosa
 import torch
 import torchaudio
 from torch.nn.utils.rnn import pad_sequence
 
-import warnings
-
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import random
+
+import safetensors
+import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from modelscope import AutoModelForCausalLM
 from omegaconf import OmegaConf
+from transformers import AutoTokenizer, SeamlessM4TFeatureExtractor
 
 from indextts.gpt.model_v2 import UnifiedVoice
-from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
-from indextts.utils.checkpoint import load_checkpoint
-from indextts.utils.front import TextNormalizer, TextTokenizer
-
-from indextts.s2mel.modules.commons import load_checkpoint2, MyModel
+from indextts.s2mel.modules.audio import mel_spectrogram
 from indextts.s2mel.modules.bigvgan import bigvgan
 from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
-from indextts.s2mel.modules.audio import mel_spectrogram
-
-from transformers import AutoTokenizer
-from modelscope import AutoModelForCausalLM
-from huggingface_hub import hf_hub_download
-import safetensors
-from transformers import SeamlessM4TFeatureExtractor
-import random
-import torch.nn.functional as F
+from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+from indextts.utils.checkpoint import load_checkpoint
+from indextts.utils.front import TextNormalizer, TextTokenizer
+from indextts.utils.maskgct_utils import build_semantic_codec, build_semantic_model
 
 
 class IndexTTS2:
@@ -766,21 +764,17 @@ class IndexTTS2:
                     enabled=self.dtype is not None,
                     dtype=self.dtype,
                 ):
-                    weight_vector_sum = torch.sum(weight_vector)
-                    if weight_vector_sum != 1.0 or emo_vector is None:
-                        emovec = self.gpt.merge_emovec(
-                            spk_cond_emb,
-                            emo_cond_emb,
-                            torch.tensor(
-                                [spk_cond_emb.shape[-1]], device=text_tokens.device
-                            ),
-                            torch.tensor(
-                                [emo_cond_emb.shape[-1]], device=text_tokens.device
-                            ),
-                            alpha=emo_alpha,
-                        )  # [1, 1280]
-                    else:
-                        emovec = emovec_mat
+                    emovec = self.gpt.merge_emovec(
+                        spk_cond_emb,
+                        emo_cond_emb,
+                        torch.tensor(
+                            [spk_cond_emb.shape[-1]], device=text_tokens.device
+                        ),
+                        torch.tensor(
+                            [emo_cond_emb.shape[-1]], device=text_tokens.device
+                        ),
+                        alpha=emo_alpha,
+                    )  # [1, 1280]
 
                     if emo_vector is not None:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
@@ -917,7 +911,6 @@ class IndexTTS2:
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
-                wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
                     print(
                         f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max()
@@ -958,7 +951,7 @@ class IndexTTS2:
                 print(">> remove old wav file:", output_path)
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
+            torchaudio.save(output_path, wav, sampling_rate)
             print(">> wav file saved to:", output_path)
             if stream_return:
                 return None
@@ -967,7 +960,7 @@ class IndexTTS2:
             if stream_return:
                 return None
             # 返回以符合Gradio的格式要求
-            wav_data = wav.type(torch.int16)
+            wav_data = wav
             wav_data = wav_data.numpy().T
             yield (sampling_rate, wav_data)
 
@@ -1145,7 +1138,6 @@ if __name__ == "__main__":
         text=text,
         output_path="gen.wav",
         verbose=True,
-        use_emo_text=True,
     )
     # char_size = 5
     # import string
