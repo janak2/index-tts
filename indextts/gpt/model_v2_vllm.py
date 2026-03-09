@@ -20,7 +20,6 @@ from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.typical_sampling import TypicalLogitsWarper
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     maybe_prefix,
@@ -32,8 +31,6 @@ from vllm import ModelRegistry
 from vllm.model_executor.models.gpt2 import GPT2Model
 from huggingface_hub import snapshot_download
 
-from indextts.utils.tensor_logger import save_tensor
-
 
 def null_position_embeddings(range, dim, dtype=torch.float32):
     if range.ndim == 1:
@@ -43,11 +40,12 @@ def null_position_embeddings(range, dim, dtype=torch.float32):
     )
 
 
-class GPT2LMHeadModel(nn.Module):
+class GPT2InferenceModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
+        # self.quant_config = quant_config
         self.transformer = GPT2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
@@ -73,7 +71,7 @@ class GPT2LMHeadModel(nn.Module):
         self.input_count = 0
         self.warmup = False
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
 
     def forward(
@@ -89,14 +87,15 @@ class GPT2LMHeadModel(nn.Module):
         )
         print("positions.shape", positions.shape if positions is not None else "None")
         print("input_ids.shape", input_ids.shape if input_ids is not None else "None")
-        print("cached_mel_emb.shape", self.cached_mel_emb.shape if self.cached_mel_emb is not None else "None")
+        print(
+            "cached_mel_emb.shape",
+            self.cached_mel_emb.shape if self.cached_mel_emb is not None else "None",
+        )
 
         # warmup or cuda graph capture
         if inputs_embeds is None:
             emb = self.embeddings(input_ids)
-            emb = emb + self.text_pos_embedding.emb(
-                positions
-            )
+            emb = emb + self.text_pos_embedding.emb(positions)
         # prefill
         elif inputs_embeds.shape[0] != 1:
             self.cached_mel_emb = inputs_embeds
@@ -117,12 +116,7 @@ class GPT2LMHeadModel(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        if sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(
-                0, sampling_metadata.selected_token_indices
-            )
         logits = self.lm_head(hidden_states)
 
         return logits
@@ -149,7 +143,7 @@ class GPT2LMHeadModel(nn.Module):
         return loader.load_weights(_remap_weights(weights))
 
 
-ModelRegistry.register_model("GPT2InferenceModel", GPT2LMHeadModel)
+ModelRegistry.register_model("GPT2InferenceModel", GPT2InferenceModel)
 
 
 class UnifiedVoiceVLLM(UnifiedVoice):
@@ -187,15 +181,14 @@ class UnifiedVoiceVLLM(UnifiedVoice):
         )
         self.inference_model = LLM(
             path,
+            runner="generate",
             max_model_len=self.max_mel_tokens + 2 + self.max_conditioning_inputs,
             max_num_seqs=8,
             skip_tokenizer_init=True,
             enable_prompt_embeds=True,
             dtype="float32" if not half else "float16",
-            gpu_memory_utilization=0.35,
-            # enforce_eager=True,
+            gpu_memory_utilization=0.25,
         )
-
 
     def inference_speech(
         self,

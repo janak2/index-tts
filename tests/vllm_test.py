@@ -52,6 +52,7 @@ def main():
         skip_tokenizer_init=False,
         enable_prompt_embeds=True,
         dtype="float16",
+        gpu_memory_utilization=0.8,
     )
 
     prompt_token_ids = [
