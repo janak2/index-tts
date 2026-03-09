@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 import transformers
 from transformers import GPT2Config, LogitsProcessorList
-from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
+from indextts.gpt.model import GPT2PreTrainedModel
+# from transformers.models.gpt2.modeling_gpt2 import GPT2PreTrainedModel
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
@@ -97,12 +98,20 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
     def store_mel_emb(self, mel_emb):
         self.cached_mel_emb = mel_emb
 
+    def _past_key_values_has_content(self, past_key_values):
+        if past_key_values is None:
+            return False
+        if hasattr(past_key_values, "get_seq_length"):
+            return past_key_values.get_seq_length() > 0
+        return bool(past_key_values)
+
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         token_type_ids = kwargs.get("token_type_ids", None)  # usually None
         if not self.kv_cache:
             past_key_values = None
+        has_past = self._past_key_values_has_content(past_key_values)
         # only last token for inputs_ids if past is defined in kwargs
-        if past_key_values:
+        if has_past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
@@ -114,7 +123,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            if past_key_values:
+            if has_past:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
             position_ids = None
