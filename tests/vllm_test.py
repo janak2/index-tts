@@ -1,15 +1,14 @@
-import os
 import time
 from random import randint, seed
-# from nanovllm import LLM, SamplingParams
-
-from vllm import LLM, SamplingParams
-from huggingface_hub import snapshot_download
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
-from vllm import ModelRegistry
-from vllm.config import VllmConfig
-import torch
 from typing import Optional
+
+import torch
+from huggingface_hub import snapshot_download
+
+# from nanovllm import LLM, SamplingParams
+from vllm import LLM, ModelRegistry, SamplingParams
+from vllm.config import VllmConfig
+from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 from vllm.sequence import IntermediateTensors
 
 
@@ -36,7 +35,7 @@ ModelRegistry.register_model("GPT2TestModel", GPT2TestModel)
 
 def main():
     seed(0)
-    num_seqs = 1
+    num_seqs = 5
     max_input_len = 1024
     max_ouput_len = 1024
 
@@ -56,13 +55,14 @@ def main():
     )
 
     prompt_token_ids = [
-        [randint(0, 10000) for _ in range(100)] for _ in range(num_seqs)
+        [randint(0, 10000) for _ in range(100)],
+        [randint(0, 10000) for _ in range(150)],
     ]
     sampling_params = [
         SamplingParams(
             temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_ouput_len)
         )
-        for _ in range(num_seqs)
+        for _ in range(len(prompt_token_ids))
     ]
     # uncomment the following line for vllm
     prompt_token_ids = [

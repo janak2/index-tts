@@ -1,40 +1,35 @@
-import os
 import time
+from collections.abc import Mapping, Sequence
 from random import randint, seed
-# from nanovllm import LLM, SamplingParams
+from typing import Mapping, Optional
 
-from vllm import LLM, SamplingParams
-from huggingface_hub import snapshot_download
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 import torch
-from vllm import ModelRegistry
+from huggingface_hub import snapshot_download
+from transformers import BatchFeature
+
+# from nanovllm import LLM, SamplingParams
+from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.config import VllmConfig
+from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import BaseProcessingInfo
-from typing import Mapping, Optional
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.processing import BaseMultiModalProcessor
-from transformers import BatchFeature
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
-    ImageSize,
     MultiModalDataItems,
 )
-from collections.abc import Iterable, Mapping, Sequence
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 
 class GPT2ProcessingInfo(BaseProcessingInfo):
@@ -149,6 +144,7 @@ def main():
         max_num_seqs=num_seqs,
         hf_overrides={"architectures": ["GPT2TestModel"]},
         skip_tokenizer_init=False,
+        dtype="float16",
     )
 
     prompt_token_ids = [
