@@ -6,8 +6,8 @@ import json
 
 PROMPTS = [
     "The morning sun cast long golden shadows across the quiet village square, where a single bicycle leaned against the old stone fountain.",
-    # "Attention passengers: Flight seven-forty-two to Barcelona is now boarding at Gate B-twelve. Please have your boarding passes ready.",
-    # "Did you really think I wouldn't notice? Oh, come on — that's the third time this week you've eaten my leftover pizza!",
+    "Attention passengers: Flight seven-forty-two to Barcelona is now boarding at Gate B-twelve. Please have your boarding passes ready.",
+    "Did you really think I wouldn't notice? Oh, come on — that's the third time this week you've eaten my leftover pizza!",
     # "To activate the device, press and hold the power button for three seconds, then release it when the blue indicator light begins to flash.",
     # "Once upon a time, in a kingdom buried beneath the clouds, there lived a tiny dragon who was terribly, hopelessly afraid of fire.",
 ]
@@ -81,7 +81,7 @@ def benchmark_v2_vllm(use_cuda_kernel=False, use_torch_compile=False, ):
 if __name__ == "__main__":
     RESULTS = []
     for use_cuda_kernel, use_torch_compile in [(True, True), (False, False)]:
-        for use_vllm, use_accel, use_deepspeed in [(True, False, False), (False, True, False), (False, False, True)]:
+        for use_vllm, use_accel, use_deepspeed in [(False, False, False), (True, False, False), (False, True, False), (False, False, True)]:
             if use_vllm:
                 rtf = benchmark_v2_vllm(use_cuda_kernel, use_torch_compile)
             else:
