@@ -10,6 +10,7 @@ import warnings
 import librosa
 import torch
 import torchaudio
+import soundfile
 from torch.nn.utils.rnn import pad_sequence
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -93,15 +94,15 @@ class IndexTTS2:
         self.use_torch_compile = use_torch_compile
         self.use_int8 = use_int8
 
-        self.qwen_emo = QwenEmotion(
-            os.path.join(self.model_dir, self.cfg.qwen_emo_path), use_int8=self.use_int8
-        )
+        # self.qwen_emo = QwenEmotion(
+        #     os.path.join(self.model_dir, self.cfg.qwen_emo_path), use_int8=self.use_int8
+        # )
 
-        # print the qwen_emo size in gigabytes
-        qwen_emo_size_gb = sum(
-            p.numel() * p.element_size() for p in self.qwen_emo.model.parameters()
-        ) / (1024**3)
-        print(f">> QwenEmotion size: {qwen_emo_size_gb:.2f} GB")
+        # # print the qwen_emo size in gigabytes
+        # qwen_emo_size_gb = sum(
+        #     p.numel() * p.element_size() for p in self.qwen_emo.model.parameters()
+        # ) / (1024**3)
+        # print(f">> QwenEmotion size: {qwen_emo_size_gb:.2f} GB")
 
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
@@ -951,7 +952,7 @@ class IndexTTS2:
                 print(">> remove old wav file:", output_path)
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            torchaudio.save(output_path, wav, sampling_rate)
+            soundfile.write(output_path, wav.cpu().numpy().squeeze(), sampling_rate)
             print(">> wav file saved to:", output_path)
             if stream_return:
                 return None
@@ -1126,6 +1127,8 @@ if __name__ == "__main__":
         model_dir=os.path.join(root_dir, "checkpoints"),
         use_cuda_kernel=False,
         use_torch_compile=False,
+        use_accel=True,
+        use_deepspeed=False,
         use_fp16=True,
         use_int8=True,
     )
