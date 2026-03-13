@@ -12,7 +12,7 @@ PROMPTS = [
     # "Once upon a time, in a kingdom buried beneath the clouds, there lived a tiny dragon who was terribly, hopelessly afraid of fire.",
 ]
 
-root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root_dir = os.path.dirname(os.path.abspath(__file__))
 
 prompt_wav = os.path.join(root_dir, "examples/voice_01.wav")
 
@@ -80,28 +80,21 @@ def benchmark_v2_vllm(use_cuda_kernel=False, use_torch_compile=False, ):
 
 if __name__ == "__main__":
     RESULTS = []
-    for use_vllm in [True, False]:
-        for use_cuda_kernel in [True, False]:
-            for use_torch_compile in [True, False]:
-                for use_accel in [True, False]:
-                    if use_vllm and use_accel:
-                        continue
-                    for use_deepspeed in [True, False]:
-                        if use_vllm and use_deepspeed:
-                            continue
-                        if use_vllm:
-                            rtf = benchmark_v2_vllm(use_cuda_kernel, use_torch_compile)
-                        else:
-                            rtf = benchmark_v2(use_cuda_kernel, use_torch_compile, use_accel, use_deepspeed)
-                        RESULTS.append({
-                            "use_vllm": use_vllm,
-                            "use_cuda_kernel": use_cuda_kernel,
-                            "use_torch_compile": use_torch_compile,
-                            "use_accel": use_accel,
-                            "use_deepspeed": use_deepspeed,
-                            "rtf": rtf,
-                        })
-                        print(f"V2 RTF: {rtf}, use_vllm: {use_vllm}, use_cuda_kernel: {use_cuda_kernel}, use_torch_compile: {use_torch_compile}, use_accel: {use_accel}, use_deepspeed: {use_deepspeed}")
+    for use_cuda_kernel, use_torch_compile in [(True, True), (False, False)]:
+        for use_vllm, use_accel, use_deepspeed in [(True, False, False), (False, True, False), (False, False, True)]:
+            if use_vllm:
+                rtf = benchmark_v2_vllm(use_cuda_kernel, use_torch_compile)
+            else:
+                rtf = benchmark_v2(use_cuda_kernel, use_torch_compile, use_accel, use_deepspeed)
+            RESULTS.append({
+                "use_vllm": use_vllm,
+                "use_cuda_kernel": use_cuda_kernel,
+                "use_torch_compile": use_torch_compile,
+                "use_accel": use_accel,
+                "use_deepspeed": use_deepspeed,
+                "rtf": rtf,
+            })
+            print(f"V2 RTF: {rtf}, use_vllm: {use_vllm}, use_cuda_kernel: {use_cuda_kernel}, use_torch_compile: {use_torch_compile}, use_accel: {use_accel}, use_deepspeed: {use_deepspeed}")
 
     with open("results.json", "w") as f:
         json.dump(RESULTS, f)
